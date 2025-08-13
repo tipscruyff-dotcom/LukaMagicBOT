@@ -60,7 +60,6 @@ if STRIPE_API_KEY:
 # ======================
 engine = None
 if DATABASE_URL:
-    # Railway normalmente fornece a URL no formato postgres://... ; SQLAlchemy aceita postgresql://...
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
@@ -71,7 +70,7 @@ CREATE TABLE IF NOT EXISTS subscribers (
     customer_id TEXT,
     subscription_id TEXT,
     plan TEXT,
-    status TEXT,                      -- 'active', 'trialing', 'past_due', 'canceled', etc
+    status TEXT,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 """
@@ -128,7 +127,7 @@ def set_status_by_customer(customer_id: str, status: str, subscription_id: Optio
     print(f"[DB] set status by customer {customer_id}: {status}")
 
 # ======================
-# Textos do bot (mantidos)
+# Textos do bot
 # ======================
 HOW_IT_WORKS_TEXT = (
     "ℹ️ **How It Works**\n\n"
@@ -143,7 +142,7 @@ HOW_IT_WORKS_TEXT = (
 )
 
 # ======================
-# Bot UI (mantido)
+# Bot UI
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -168,6 +167,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.effective_message.reply_text(f"🆔 Your Telegram ID is: {user_id}")
+
+async def groupid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    chat_title = update.effective_chat.title or "Private Chat"
+    await update.effective_message.reply_text(f"📌 Group Name: {chat_title}\n🆔 Group ID: `{chat_id}`", parse_mode="Markdown")
 
 async def open_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -286,18 +290,13 @@ async def health():
 
 def _extract_email_from_session(session: dict) -> Optional[str]:
     email = None
-    # Priority: customer_details.email
     cd = session.get("customer_details") or {}
     email = cd.get("email")
     if email:
         return email.lower()
-
-    # legacy fields
     email = session.get("customer_email")
     if email:
         return email.lower()
-
-    # As fallback, try line items? (skipped for simplicity)
     return None
 
 @app.post("/stripe/webhook")
@@ -313,7 +312,6 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None, 
     etype = event.get("type")
     obj = event["data"]["object"]
 
-    # checkout.session.completed —> marca ativo
     if etype == "checkout.session.completed":
         email = _extract_email_from_session(obj)
         customer_id = obj.get("customer")
@@ -322,18 +320,15 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None, 
         status = "active"
         upsert_subscriber(email=email, customer_id=customer_id, subscription_id=subscription_id, plan=plan, status=status)
 
-    # invoice.payment_succeeded —> mantém ativo
     elif etype == "invoice.payment_succeeded":
         customer_id = obj.get("customer")
         subscription_id = obj.get("subscription")
         set_status_by_customer(customer_id, "active", subscription_id)
 
-    # invoice.payment_failed —> marca past_due (aviso)
     elif etype == "invoice.payment_failed":
         customer_id = obj.get("customer")
         set_status_by_customer(customer_id, "past_due", None)
 
-    # customer.subscription.deleted —> cancelado
     elif etype == "customer.subscription.deleted":
         customer_id = obj.get("customer")
         set_status_by_customer(customer_id, "canceled", obj.get("id"))
@@ -341,24 +336,21 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None, 
     return {"received": True}
 
 # ======================
-# Main: start app
+# Main
 # ======================
 def main():
-    # DB
     try:
         db_setup()
     except OperationalError as e:
         print(f"[DB] Erro ao conectar/criar tabela: {e}")
 
-    # Telegram App
     application: Application = ApplicationBuilder().token(TOKEN).build()
 
-    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("myid", myid))
+    application.add_handler(CommandHandler("groupid", groupid))
     application.add_handler(CallbackQueryHandler(button_router))
 
-    # Conversa do Unlock (email)
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern="^unlock\\.access$")],
         states={
@@ -369,8 +361,6 @@ def main():
     )
     application.add_handler(conv)
 
-    # Telegram Webhook (não usar polling no Railway)
-    # Webhook URL: https://<PUBLIC_URL>/<TOKEN>
     application.run_webhook(
         listen="0.0.0.0",
         port=int(os.environ.get("PORT", "8080")),
