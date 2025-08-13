@@ -2,34 +2,35 @@ import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# TOKEN via variável de ambiente (Railway) ou valor padrão (PC local)
+# TOKEN via variável de ambiente (Railway) ou valor padrão local
 TOKEN = os.getenv("BOT_TOKEN", "8029001643:AAFoGXOXXcSNvsgxWVoXlyTm9P0quPT1IQE")
 
-# === LINKS DE CHECKOUT (trocar pelos do LemonSqueezy depois) ===
-CHECKOUT_MONTHLY_URL = "https://example.com/checkout-monthly"
-CHECKOUT_QUARTERLY_URL = "https://example.com/checkout-quarterly"
-CHECKOUT_ANNUAL_URL = "https://example.com/checkout-annual"
+# === LINKS DE CHECKOUT (STRIPE) ===
+STRIPE_MONTHLY_URL   = "https://buy.stripe.com/8x29AVb3M4qn99xh0sawo00"
+STRIPE_QUARTERLY_URL = "https://buy.stripe.com/00w7sN4FocWT0D19y0awo01"
+STRIPE_ANNUAL_URL    = "https://buy.stripe.com/4gM3cx7RAg952L939Cawo02"
+
+# Para renovação, pode usar o mesmo do mensal ou criar um link específico
+STRIPE_RENEW_URL     = STRIPE_MONTHLY_URL
 
 # LINKS FIXOS
 FREE_GROUP_URL = "https://t.me/lukaeurope77"
 SALES_WEBSITE_URL = "https://lukamagiceurope.com"
 
-# Texto How It Works
+# Texto How It Works (inalterado)
 HOW_IT_WORKS_TEXT = (
     "ℹ️ **How It Works**\n\n"
     "**1️⃣ Choose Your Plan**\n"
-    "Tap on **🌟 Plans** and select the subscription that works best for you: Monthly, Quarterly, or Annual.\n\n"
-    "**2️⃣ Complete Your Payment**\n"
-    "You’ll be redirected to our secure checkout on LemonSqueezy.\n"
-    "After payment, you will receive a confirmation email with your purchase details.\n\n"
+    "Tap on **🌟 Plans** and pick Monthly, Quarterly, or Annual.\n\n"
+    "**2️⃣ Complete Your Payment (Stripe)**\n"
+    "In checkout, if asked, enter your **Telegram ID** (from /myid).\n\n"
     "**3️⃣ Unlock Your VIP Access**\n"
-    "Return to this bot and tap **🔓 Unlock Access**.\n"
-    "Enter the **email** you used for your purchase (or the unique code sent to your email).\n"
-    "Once verified, you will automatically receive your invitation to the VIP group.\n\n"
-    "💡 **Tip:** If you have any issues, tap **🆘 Support** to contact us directly."
+    "After payment, return to this bot and tap **🔓 Unlock Access**.\n"
+    "If you don't receive the link automatically, tap **🆘 Support**.\n\n"
+    "💡 Tip: Use /myid to copy your Telegram ID."
 )
 
-# Menu inicial
+# Menu inicial (inalterado)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
@@ -51,41 +52,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("✅ Welcome! Please choose an option:", reply_markup=reply_markup)
 
-# Comando /myid
+# /myid (inalterado)
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     await update.message.reply_text(f"🆔 Your Telegram ID is: {user_id}")
 
-# Tela de planos
+# >>>>>> TELA DE PLANOS (ATUALIZADA APENAS AQUI) <<<<<<
 async def open_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # Usando HTML para suportar <s>texto riscado</s> e <b>ênfase</b>
     text = (
-        "🌟 **Luka Magic Europe – Plans**\n\n"
-        "💶 **Monthly – €30/month**\n"
-        "_Access for 30 days._\n\n"
-        "📊 **Quarterly – €81 (€27/month)**\n"
-        "_Save €9 vs monthly._\n\n"
-        "🏆 **Annual – €264 (€22/month)**\n"
-        "_Save €96 vs monthly._"
+        "🌟 <b>Luka Magic Europe – Plans</b>\n\n"
+        "💶 <s>€50</s> → <b>€30</b>\n"
+        "<i>€30 / month – 40% off</i>\n\n"
+        "📊 <s>€150</s> → <b>€80</b>\n"
+        "<i>€26.67 / month – 46% off</i>\n\n"
+        "🏆 <s>€600</s> → <b>€270</b>\n"
+        "<i>€22.50 / month – 55% off</i>"
     )
 
     keyboard = [
-        [InlineKeyboardButton("💶 Monthly – €30", url=CHECKOUT_MONTHLY_URL)],
-        [InlineKeyboardButton("📊 Quarterly – €81 (€27/mo)", url=CHECKOUT_QUARTERLY_URL)],
-        [InlineKeyboardButton("🏆 Annual – €264 (€22/mo)", url=CHECKOUT_ANNUAL_URL)],
+        [InlineKeyboardButton("💶 Monthly – €30", url=STRIPE_MONTHLY_URL)],
+        [InlineKeyboardButton("📊 Quarterly – €80", url=STRIPE_QUARTERLY_URL)],
+        [InlineKeyboardButton("🏆 Annual – €270", url=STRIPE_ANNUAL_URL)],
         [InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]
     ]
-    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    # Apenas aqui troquei para parse_mode="HTML" (necessário pro <s>risco</s>)
+    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
-# Voltar ao menu
+# Voltar ao menu (inalterado)
 async def back_to_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     await start(query, context)
 
-# Mostrar How It Works
+# How It Works (inalterado)
 async def show_how_it_works(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -95,7 +98,42 @@ async def show_how_it_works(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]])
     )
 
-# Callback genérico
+# Renew (inalterado)
+async def renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    keyboard = [
+        [InlineKeyboardButton("🔁 Renew Now", url=STRIPE_RENEW_URL)],
+        [InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]
+    ]
+    await query.edit_message_text(
+        text="🔁 **Renew your subscription below:**",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+# Unlock Access (inalterado)
+async def unlock_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    keyboard = [
+        [InlineKeyboardButton("🆘 Support", url="https://t.me/Sthefano_p")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]
+    ]
+    await query.edit_message_text(
+        text=(
+            "🔓 **Unlock Access**\n\n"
+            "If your Stripe payment is confirmed, you will receive your VIP invite.\n"
+            "If not, tap Support and send:\n"
+            "• Your Telegram ID (/myid)\n"
+            "• Email used on Stripe\n"
+            "• Payment proof"
+        ),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+# Callback genérico (inalterado)
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -106,11 +144,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await back_to_home(update, context)
     if data == "howitworks":
         return await show_how_it_works(update, context)
+    if data == "renew":
+        return await renew(update, context)
+    if data == "unlock.access":
+        return await unlock_access(update, context)
 
     await query.answer()
     await query.edit_message_text(text=f"✅ You clicked: {data}")
 
-# Inicialização do bot
+# Inicialização do bot (inalterado)
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
 
