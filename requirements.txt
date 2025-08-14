@@ -1,4 +1,3 @@
-Requirements 
 python-telegram-bot==21.*
 fastapi==0.111.*
 uvicorn==0.30.*
