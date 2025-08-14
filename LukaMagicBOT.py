@@ -4,7 +4,6 @@ import stripe
 from datetime import datetime, timedelta
 from typing import Optional, List
 
-# Carrega variáveis do .env (para rodar local sem export manual)
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -22,7 +21,6 @@ from telegram.ext import (
 
 from fastapi import FastAPI, Request, Header, HTTPException
 
-# ==== DB (PostgreSQL via SQLAlchemy) ====
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
@@ -42,10 +40,8 @@ STRIPE_QUARTERLY_URL = "https://buy.stripe.com/00w7sN4FocWT0D19y0awo01"
 STRIPE_ANNUAL_URL    = "https://buy.stripe.com/4gM3cx7RAg952L939Cawo02"
 STRIPE_RENEW_URL     = STRIPE_MONTHLY_URL
 
-# Link de convite fixo (fallback; preferimos convites 1-uso por grupo)
 VIP_INVITE_LINK = os.getenv("VIP_INVITE_LINK", "https://t.me/+SEU_LINK_VIP_AQUI")
 
-# Lista de grupos VIP (IDs separados por vírgula)
 def _parse_group_ids(raw: str) -> List[int]:
     ids: List[int] = []
     for p in (raw or "").split(","):
@@ -60,7 +56,6 @@ def _parse_group_ids(raw: str) -> List[int]:
 
 VIP_GROUP_IDS: List[int] = _parse_group_ids(os.getenv("VIP_GROUP_IDS", ""))
 
-# DB URL (Railway Postgres)
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # ======================
@@ -74,7 +69,6 @@ if STRIPE_API_KEY:
 # ======================
 engine = None
 if DATABASE_URL:
-    # Railway às vezes fornece postgres:// ; SQLAlchemy aceita postgresql://
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
@@ -85,7 +79,7 @@ CREATE TABLE IF NOT EXISTS subscribers (
     customer_id TEXT,
     subscription_id TEXT,
     plan TEXT,
-    status TEXT,                      -- 'active', 'trialing', 'past_due', 'canceled', etc
+    status TEXT,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 """
@@ -193,7 +187,6 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.effective_message.reply_text(f"🆔 Your Telegram ID is: {user_id}")
 
-# /groupid — retorna o ID do chat/grupo atual
 async def groupid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     chat_title = update.effective_chat.title or "Private Chat"
@@ -254,7 +247,7 @@ async def renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ======================
-# Unlock Access (email -> convites 1 uso)
+# Unlock Access
 # ======================
 ASK_EMAIL = 10
 EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -268,7 +261,9 @@ async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Op
         for gid in VIP_GROUP_IDS:
             try:
                 link = await context.bot.create_chat_invite_link(
-                    chat_id=gid, expire_date=expire_at, member_limit=1
+                    chat_id=gid,
+                    expire_date=expire_at,
+                    member_limit=1
                 )
                 lines.append(f"• {link.invite_link}")
             except Exception as e:
@@ -324,7 +319,6 @@ async def unlock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("Cancelled.")
     return ConversationHandler.END
 
-# Router dos botões (genérico) — NÃO tratar unlock.access aqui
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
     if data == "plans.open":
@@ -335,11 +329,13 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_how_it_works(update, context)
     if data == "renew":
         return await renew(update, context)
+    if data == "unlock.access":
+        return await unlock_access_prompt(update, context)
     await update.callback_query.answer()
     await update.callback_query.edit_message_text(text=f"✅ You clicked: {data}")
 
 # ======================
-# FastAPI (Webhook Stripe + Health)
+# FastAPI (Webhook Stripe + Telegram)
 # ======================
 app = FastAPI()
 
@@ -357,17 +353,11 @@ def _extract_email_from_session(session: dict) -> Optional[str]:
         return email.lower()
     return None
 
-# Aceita /stripe/webhook (recomendado)
 @app.post("/stripe/webhook")
-async def stripe_webhook(request: Request, stripe_signature: str = Header(None, alias="Stripe-Signature")):
-    return await _handle_stripe(request, stripe_signature)
-
-# E também /stripe_webhook (caso esteja assim no Stripe)
-@app.post("/stripe_webhook")
-async def stripe_webhook_alt(request: Request, stripe_signature: str = Header(None, alias="Stripe-Signature")):
-    return await _handle_stripe(request, stripe_signature)
-
-async def _handle_stripe(request: Request, stripe_signature: str):
+async def stripe_webhook(
+    request: Request,
+    stripe_signature: str = Header(None, alias="Stripe-Signature")
+):
     if not STRIPE_WEBHOOK_SECRET:
         raise HTTPException(status_code=500, detail="Webhook secret not configured")
     payload = await request.body()
@@ -385,12 +375,14 @@ async def _handle_stripe(request: Request, stripe_signature: str):
         email = _extract_email_from_session(obj)
         customer_id = obj.get("customer")
         subscription_id = obj.get("subscription")
+        plan = None
+        status = "active"
         upsert_subscriber(
             email=email,
             customer_id=customer_id,
             subscription_id=subscription_id,
-            plan=None,
-            status="active"
+            plan=plan,
+            status=status
         )
 
     elif etype == "invoice.payment_succeeded":
@@ -408,53 +400,46 @@ async def _handle_stripe(request: Request, stripe_signature: str):
 
     return {"received": True}
 
-# ======================
-# Main
-# ======================
-def main():
-    if not TOKEN:
-        raise RuntimeError("BOT_TOKEN não definido. Configure no .env ou nas Variables do Railway.")
+# ===== Telegram via FastAPI =====
+# Criamos a Application global e registramos os handlers
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN não definido. Configure no .env/Variables do Railway.")
+application: Application = ApplicationBuilder().token(TOKEN).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("myid", myid))
+application.add_handler(CommandHandler("groupid", groupid))
+application.add_handler(CallbackQueryHandler(button_router))
 
-    try:
-        db_setup()
-    except OperationalError as e:
-        print(f"[DB] Erro ao conectar/criar tabela: {e}")
+conv = ConversationHandler(
+    entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern="^unlock\\.access$")],
+    states={ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]},
+    fallbacks=[CommandHandler("cancel", unlock_cancel)],
+    allow_reentry=True,
+)
+application.add_handler(conv)
 
-    application: Application = ApplicationBuilder().token(TOKEN).build()
+# Lifecycle do PTB dentro do FastAPI
+@app.on_event("startup")
+async def _on_startup():
+    db_setup()
+    await application.initialize()
+    if not PUBLIC_URL:
+        raise RuntimeError("PUBLIC_URL não definido para webhook.")
+    # seta o webhook do Telegram para nossa rota FastAPI /{TOKEN}
+    await application.bot.set_webhook(url=f"{PUBLIC_URL}/{TOKEN}")
+    await application.start()
+    print("[BOT] PTB iniciado e webhook setado.")
 
-    # Handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("myid", myid))
-    application.add_handler(CommandHandler("groupid", groupid))
+@app.on_event("shutdown")
+async def _on_shutdown():
+    await application.stop()
+    await application.shutdown()
+    print("[BOT] PTB parado.")
 
-    # Conversa do Unlock (entry point via callback "unlock.access")
-    conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern="^unlock\\.access$")],
-        states={
-            ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]
-        },
-        fallbacks=[CommandHandler("cancel", unlock_cancel)],
-        allow_reentry=True,
-    )
-    application.add_handler(conv)
-
-    # Handler genérico de botões (vem DEPOIS, para não engolir o unlock.access)
-    application.add_handler(CallbackQueryHandler(button_router))
-
-    # Execução:
-    if os.getenv("LOCAL_POLLING", "0") == "1":
-        print("[BOT] Rodando em modo LOCAL (polling).")
-        application.run_polling()
-    else:
-        if not PUBLIC_URL:
-            raise RuntimeError("PUBLIC_URL não definido para webhook.")
-        print("[BOT] Rodando em modo WEBHOOK.")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.environ.get("PORT", "8080")),
-            url_path=TOKEN,
-            webhook_url=f"{PUBLIC_URL}/{TOKEN}"
-        )
-
-if __name__ == "__main__":
-    main()
+# Rota que recebe as atualizações do Telegram e repassa para o PTB
+@app.post(f"/{TOKEN}")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return {"ok": True}
