@@ -1,7 +1,5 @@
 # LukaMagicBOT.py
-import os
-import re
-import stripe
+import os, re, stripe
 from datetime import datetime, timedelta
 from typing import Optional, List
 
@@ -10,38 +8,30 @@ load_dotenv()
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    ApplicationBuilder,
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
+    ApplicationBuilder, Application,
+    CommandHandler, CallbackQueryHandler,
+    ContextTypes, ConversationHandler, MessageHandler, filters,
 )
 
 from fastapi import FastAPI, Request, Header, HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
-# ======================
-# 🔐 Config
-# ======================
+# ------------------ Config ------------------
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN não definido.")
 TOKEN_PREFIX = TOKEN.split(":")[0]
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
+
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
-# Links Stripe
 STRIPE_MONTHLY_URL   = "https://buy.stripe.com/8x29AVb3M4qn99xh0sawo00"
 STRIPE_QUARTERLY_URL = "https://buy.stripe.com/00w7sN4FocWT0D19y0awo01"
 STRIPE_ANNUAL_URL    = "https://buy.stripe.com/4gM3cx7RAg952L939Cawo02"
 STRIPE_RENEW_URL     = STRIPE_MONTHLY_URL
 
-# Link fallback
 VIP_INVITE_LINK = os.getenv("VIP_INVITE_LINK", "https://t.me/+SEU_LINK_VIP_AQUI")
 
 def _parse_group_ids(raw: str) -> List[int]:
@@ -50,15 +40,12 @@ def _parse_group_ids(raw: str) -> List[int]:
         p = p.strip()
         if not p:
             continue
-        try:
-            ids.append(int(p))
-        except ValueError:
-            pass
+        try: ids.append(int(p))
+        except ValueError: pass
     return ids
 
 VIP_GROUP_IDS: List[int] = _parse_group_ids(os.getenv("VIP_GROUP_IDS", ""))
 
-# DB
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 if STRIPE_API_KEY:
     stripe.api_key = STRIPE_API_KEY
@@ -82,7 +69,7 @@ CREATE TABLE IF NOT EXISTS subscribers (
 
 def db_setup():
     if not engine:
-        print("[DB] DATABASE_URL não configurado — rodando sem persistência!")
+        print("[DB] DATABASE_URL não configurado — sem persistência.")
         return
     with engine.begin() as conn:
         conn.execute(text(DDL_CREATE_TABLE))
@@ -91,11 +78,9 @@ def db_setup():
 def upsert_subscriber(*, email: Optional[str], customer_id: Optional[str],
                       subscription_id: Optional[str], plan: Optional[str], status: str):
     if not engine:
-        print("[DB] skip upsert (sem DB).", email, status)
-        return
+        print("[DB] skip upsert (sem DB).", email, status); return
     if not (email or customer_id):
-        print("[DB] upsert ignorado (sem email e sem customer_id)")
-        return
+        print("[DB] upsert ignorado (sem email/customer_id)"); return
     sql = text("""
         INSERT INTO subscribers (email, customer_id, subscription_id, plan, status, updated_at)
         VALUES (:email, :customer_id, :subscription_id, :plan, :status, NOW())
@@ -111,22 +96,19 @@ def upsert_subscriber(*, email: Optional[str], customer_id: Optional[str],
             email=(email.lower() if email else None),
             customer_id=customer_id,
             subscription_id=subscription_id,
-            plan=plan,
-            status=status
+            plan=plan, status=status
         ))
     print(f"[DB] upsert {email or customer_id}: {status}")
 
 def get_by_email(email: str) -> Optional[dict]:
-    if not engine:
-        return None
+    if not engine: return None
     sql = text("SELECT email, customer_id, subscription_id, plan, status FROM subscribers WHERE email = :email")
     with engine.begin() as conn:
         row = conn.execute(sql, {"email": email.lower()}).mappings().first()
         return dict(row) if row else None
 
 def set_status_by_customer(customer_id: str, status: str, subscription_id: Optional[str] = None):
-    if not engine:
-        return
+    if not engine: return
     sql = text("""
         UPDATE subscribers
         SET status = :status,
@@ -138,9 +120,7 @@ def set_status_by_customer(customer_id: str, status: str, subscription_id: Optio
         conn.execute(sql, {"status": status, "subscription_id": subscription_id, "customer_id": customer_id})
     print(f"[DB] set status by customer {customer_id}: {status}")
 
-# ======================
-# Textos (HTML)
-# ======================
+# ------------------ Textos ------------------
 HOW_IT_WORKS_TEXT = (
     "ℹ️ <b>How It Works</b><br><br>"
     "<b>1️⃣ Choose Your Plan</b><br>"
@@ -153,33 +133,23 @@ HOW_IT_WORKS_TEXT = (
     "💡 Tip: If you have any issues, tap <b>🆘 Support</b>."
 )
 
-# ======================
-# Handlers do Bot
-# ======================
+# ------------------ Handlers ------------------
 ASK_EMAIL = 10
 EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [
-            InlineKeyboardButton("🆘 Support", url="https://t.me/Sthefano_p"),
-            InlineKeyboardButton("🔁 Renew", callback_data="renew")
-        ],
-        [
-            InlineKeyboardButton("🔓 Unlock Access", callback_data="unlock.access"),
-            InlineKeyboardButton("🌟 Plans", callback_data="plans.open")
-        ],
-        [
-            InlineKeyboardButton("🎁 Free Group", url="https://t.me/lukaeurope77"),
-            InlineKeyboardButton("ℹ️ How It Works", callback_data="howitworks")
-        ],
-        [
-            InlineKeyboardButton("🌐 Sales Website", url="https://lukamagiceurope.com")
-        ]
+    kb = [
+        [InlineKeyboardButton("🆘 Support", url="https://t.me/Sthefano_p"),
+         InlineKeyboardButton("🔁 Renew", callback_data="renew")],
+        [InlineKeyboardButton("🔓 Unlock Access", callback_data="unlock.access"),
+         InlineKeyboardButton("🌟 Plans", callback_data="plans.open")],
+        [InlineKeyboardButton("🎁 Free Group", url="https://t.me/lukaeurope77"),
+         InlineKeyboardButton("ℹ️ How It Works", callback_data="howitworks")],
+        [InlineKeyboardButton("🌐 Sales Website", url="https://lukamagiceurope.com")]
     ]
     await update.effective_message.reply_html(
         "✅ <b>Welcome!</b> Please choose an option:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(kb)
     )
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -193,62 +163,48 @@ async def groupid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def open_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    q = update.callback_query
+    await q.answer()
     text = (
         "🌟 <b>Luka Magic Europe – Plans</b><br><br>"
-        "💶 <s>€50</s> → <b>€30</b><br>"
-        "<i>€30 / month – 40% off</i><br><br>"
-        "📊 <s>€150</s> → <b>€80</b><br>"
-        "<i>€26.67 / month – 46% off</i><br><br>"
-        "🏆 <s>€600</s> → <b>€270</b><br>"
-        "<i>€22.50 / month – 55% off</i>"
+        "💶 <s>€50</s> → <b>€30</b><br><i>€30 / month – 40% off</i><br><br>"
+        "📊 <s>€150</s> → <b>€80</b><br><i>€26.67 / month – 46% off</i><br><br>"
+        "🏆 <s>€600</s> → <b>€270</b><br><i>€22.50 / month – 55% off</i>"
     )
-    keyboard = [
+    kb = [
         [InlineKeyboardButton("💶 Monthly – €30", url=STRIPE_MONTHLY_URL)],
         [InlineKeyboardButton("📊 Quarterly – €80", url=STRIPE_QUARTERLY_URL)],
         [InlineKeyboardButton("🏆 Annual – €270", url=STRIPE_ANNUAL_URL)],
         [InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]
     ]
-    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await q.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
 async def back_to_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await start(update, context)
 
 async def show_how_it_works(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        text=HOW_IT_WORKS_TEXT,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]])
-    )
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(text=HOW_IT_WORKS_TEXT, parse_mode="HTML",
+                              reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]]))
 
 async def renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    keyboard = [
-        [InlineKeyboardButton("🔁 Renew Now", url=STRIPE_RENEW_URL)],
-        [InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]
-    ]
-    await query.edit_message_text(
-        text="🔁 <b>Renew your subscription below:</b>",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"
-    )
+    q = update.callback_query
+    await q.answer()
+    kb = [[InlineKeyboardButton("🔁 Renew Now", url=STRIPE_RENEW_URL)],
+          [InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]]
+    await q.edit_message_text(text="🔁 <b>Renew your subscription below:</b>",
+                              reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
 async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
-    if not VIP_GROUP_IDS:
-        return None
+    if not VIP_GROUP_IDS: return None
     try:
         expire_at = datetime.utcnow() + timedelta(hours=24)
         lines = []
         for gid in VIP_GROUP_IDS:
             try:
-                link = await context.bot.create_chat_invite_link(
-                    chat_id=gid, expire_date=expire_at, member_limit=1
-                )
+                link = await context.bot.create_chat_invite_link(chat_id=gid, expire_date=expire_at, member_limit=1)
                 lines.append(f"• {link.invite_link}")
             except Exception as e:
                 print(f"[INVITE] Falha ao criar convite para {gid}: {e}")
@@ -259,14 +215,12 @@ async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Op
     return None
 
 async def unlock_access_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        text=(
-            "🔓 <b>Unlock Access</b><br><br>"
-            "Please type the <b>email</b> you used on Stripe.<br>"
-            "If your subscription is active, I'll send your VIP invite(s)."
-        ),
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        text=("🔓 <b>Unlock Access</b><br><br>"
+              "Please type the <b>email</b> you used on Stripe.<br>"
+              "If your subscription is active, I'll send your VIP invite(s)."),
         parse_mode="HTML"
     )
     return ASK_EMAIL
@@ -282,13 +236,10 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
         invites_text = await _generate_single_use_invites(context)
         if invites_text:
             await update.effective_message.reply_html(
-                f"✅ Access granted for <b>{email}</b>!<br>{invites_text}",
-                disable_web_page_preview=True
-            )
+                f"✅ Access granted for <b>{email}</b>!<br>{invites_text}", disable_web_page_preview=True)
         else:
             await update.effective_message.reply_html(
-                f"✅ Access granted for <b>{email}</b>!<br>Here is your VIP invite:<br>{VIP_INVITE_LINK}"
-            )
+                f"✅ Access granted for <b>{email}</b>!<br>Here is your VIP invite:<br>{VIP_INVITE_LINK}")
         return ConversationHandler.END
 
     await update.effective_message.reply_html(
@@ -303,46 +254,46 @@ async def unlock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
-    if data == "plans.open":
-        return await open_plans(update, context)
-    if data == "plans.back":
-        return await back_to_home(update, context)
-    if data == "howitworks":
-        return await show_how_it_works(update, context)
-    if data == "renew":
-        return await renew(update, context)
+    if data == "plans.open":  return await open_plans(update, context)
+    if data == "plans.back":  return await back_to_home(update, context)
+    if data == "howitworks":  return await show_how_it_works(update, context)
+    if data == "renew":       return await renew(update, context)
     await update.callback_query.answer()
     await update.callback_query.edit_message_text(text=f"✅ You clicked: {data}")
 
-# ======================
-# Monta Application (ordem IMPORTA!)
-# ======================
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    # Loga erro e evita spinner infinito
+    print("[ERROR]", context.error)
+    try:
+        if isinstance(update, Update) and update.callback_query:
+            await update.callback_query.answer(text="⚠️ Error. Try again.", show_alert=False)
+    except Exception:
+        pass
+
+# ------------------ Telegram Application ------------------
 def build_tg_app() -> Application:
-    application: Application = ApplicationBuilder().token(TOKEN).build()
+    appx: Application = ApplicationBuilder().token(TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("myid", myid))
-    application.add_handler(CommandHandler("groupid", groupid))
+    appx.add_error_handler(on_error)
 
-    # 1) ConversationHandler primeiro (para capturar unlock.access)
+    appx.add_handler(CommandHandler("start", start))
+    appx.add_handler(CommandHandler("myid", myid))
+    appx.add_handler(CommandHandler("groupid", groupid))
+
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern=r"^unlock\.access$")],
         states={ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]},
         fallbacks=[CommandHandler("cancel", unlock_cancel)],
         allow_reentry=True,
     )
-    application.add_handler(conv)
+    appx.add_handler(conv)
+    appx.add_handler(CallbackQueryHandler(button_router))
 
-    # 2) Depois o roteador genérico
-    application.add_handler(CallbackQueryHandler(button_router))
-
-    return application
+    return appx
 
 tg_app: Application = build_tg_app()
 
-# ======================
-# FastAPI (Stripe + Telegram Webhook + Health)
-# ======================
+# ------------------ FastAPI ------------------
 app = FastAPI()
 
 @app.get("/")
@@ -351,13 +302,8 @@ async def health():
 
 def _extract_email_from_session(session: dict) -> Optional[str]:
     cd = session.get("customer_details") or {}
-    email = cd.get("email")
-    if email:
-        return email.lower()
-    email = session.get("customer_email")
-    if email:
-        return email.lower()
-    return None
+    email = cd.get("email") or session.get("customer_email")
+    return email.lower() if email else None
 
 @app.post("/stripe/webhook")
 async def stripe_webhook(request: Request, stripe_signature: str = Header(None, alias="Stripe-Signature")):
@@ -369,39 +315,36 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None, 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid signature: {e}")
 
-    etype = event.get("type")
-    obj = event["data"]["object"]
+    etype = event.get("type"); obj = event["data"]["object"]
 
     if etype == "checkout.session.completed":
-        email = _extract_email_from_session(obj)
-        customer_id = obj.get("customer")
-        subscription_id = obj.get("subscription")
-        upsert_subscriber(email=email, customer_id=customer_id, subscription_id=subscription_id, plan=None, status="active")
+        upsert_subscriber(email=_extract_email_from_session(obj),
+                          customer_id=obj.get("customer"),
+                          subscription_id=obj.get("subscription"),
+                          plan=None, status="active")
 
     elif etype == "invoice.payment_succeeded":
-        customer_id = obj.get("customer")
-        subscription_id = obj.get("subscription")
-        set_status_by_customer(customer_id, "active", subscription_id)
+        set_status_by_customer(obj.get("customer"), "active", obj.get("subscription"))
 
     elif etype == "invoice.payment_failed":
-        customer_id = obj.get("customer")
-        set_status_by_customer(customer_id, "past_due", None)
+        set_status_by_customer(obj.get("customer"), "past_due", None)
 
     elif etype == "customer.subscription.deleted":
-        customer_id = obj.get("customer")
-        set_status_by_customer(customer_id, "canceled", obj.get("id"))
+        set_status_by_customer(obj.get("customer"), "canceled", obj.get("id"))
 
     return {"received": True}
 
+# aceita prefixo e token completo (evita mismatch)
 @app.post(f"/telegram/{{token_prefix}}")
-async def telegram_webhook(token_prefix: str, request: Request):
-    if token_prefix != TOKEN_PREFIX:
+async def telegram_webhook_prefix(token_prefix: str, request: Request):
+    if token_prefix not in (TOKEN_PREFIX, TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
     data = await request.json()
     update = Update.de_json(data, tg_app.bot)
     await tg_app.process_update(update)
     return {"ok": True}
 
+# ------------------ Lifecycle ------------------
 @app.on_event("startup")
 async def on_startup():
     try:
@@ -413,6 +356,11 @@ async def on_startup():
     await tg_app.start()
 
     if PUBLIC_URL:
+        # limpa e seta o webhook com allowed_updates incluindo callback_query
+        try:
+            await tg_app.bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            print("[TG] delete_webhook:", e)
         url = f"{PUBLIC_URL}/telegram/{TOKEN_PREFIX}"
         try:
             await tg_app.bot.set_webhook(url, allowed_updates=["message", "callback_query"])
