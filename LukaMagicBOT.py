@@ -1,59 +1,65 @@
 import os
 import re
-import stripe
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional, List
 
+# ---------- ENV ----------
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Request, Header, HTTPException
+# ---------- Telegram ----------
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    ApplicationBuilder,
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
+    Application, ApplicationBuilder,
+    CommandHandler, CallbackQueryHandler,
+    ContextTypes, ConversationHandler, MessageHandler, filters
 )
 
-# ==== DB (PostgreSQL via SQLAlchemy) ====
+# ---------- FastAPI (Stripe webhook) ----------
+from fastapi import FastAPI, Request, Header, HTTPException
+
+# ---------- Stripe ----------
+import stripe
+
+# ---------- DB ----------
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
 # ======================
-# 🔐 Config (via ENV)
+# CONFIG
 # ======================
-TOKEN = os.getenv("BOT_TOKEN", "")
+TOKEN = os.getenv("BOT_TOKEN", "").strip()
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
-STRIPE_API_KEY = os.getenv("STRIPE_API_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-DATABASE_URL = os.getenv("DATABASE_URL", "")
-VIP_INVITE_LINK = os.getenv("VIP_INVITE_LINK", "https://t.me/+SEU_LINK_VIP_AQUI")
+STRIPE_API_KEY = os.getenv("STRIPE_API_KEY", "").strip()
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
 
+# Links do Stripe (pagamento pelo botão Plans)
 STRIPE_MONTHLY_URL   = "https://buy.stripe.com/8x29AVb3M4qn99xh0sawo00"
 STRIPE_QUARTERLY_URL = "https://buy.stripe.com/00w7sN4FocWT0D19y0awo01"
 STRIPE_ANNUAL_URL    = "https://buy.stripe.com/4gM3cx7RAg952L939Cawo02"
+
+# Convite padrão (caso não consigamos criar 1-uso)
+VIP_INVITE_LINK = os.getenv("VIP_INVITE_LINK", "").strip()
 
 def _parse_group_ids(raw: str) -> List[int]:
     ids: List[int] = []
     for p in (raw or "").split(","):
         p = p.strip()
-        if p:
-            try:
-                ids.append(int(p))
-            except ValueError:
-                pass
+        if not p:
+            continue
+        try:
+            ids.append(int(p))
+        except ValueError:
+            pass
     return ids
 
 VIP_GROUP_IDS: List[int] = _parse_group_ids(os.getenv("VIP_GROUP_IDS", ""))
 
-# ======================
+# DB URL
+DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgres://", "postgresql://")
+
 # Stripe init
-# ======================
 if STRIPE_API_KEY:
     stripe.api_key = STRIPE_API_KEY
 
@@ -62,41 +68,43 @@ if STRIPE_API_KEY:
 # ======================
 engine = None
 if DATABASE_URL:
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 DDL_CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS subscribers (
     id SERIAL PRIMARY KEY,
     email TEXT UNIQUE,
+    telegram_id TEXT,
     customer_id TEXT,
     subscription_id TEXT,
     plan TEXT,
-    status TEXT,                      -- 'active', 'trialing', 'past_due', 'canceled', etc
+    status TEXT,                      -- active, trialing, past_due, canceled
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 """
 
 def db_setup():
     if not engine:
-        print("[DB] DATABASE_URL não configurado — rodando sem persistência!")
+        print("[DB] DATABASE_URL não configurado — rodando sem DB!")
         return
     with engine.begin() as conn:
         conn.execute(text(DDL_CREATE_TABLE))
     print("[DB] Tabela 'subscribers' ok.")
 
-def upsert_subscriber(*, email: Optional[str], customer_id: Optional[str],
-                      subscription_id: Optional[str], plan: Optional[str], status: str):
+def upsert_subscriber(*, email: Optional[str], telegram_id: Optional[str],
+                      customer_id: Optional[str], subscription_id: Optional[str],
+                      plan: Optional[str], status: str):
     if not engine:
-        print("[DB] SKIP upsert (sem DB).", email, status)
+        print("[DB] skip upsert (sem DB).", email, status)
         return
-    if not (email or customer_id):
-        print("[DB] upsert ignorado (sem email e sem customer_id)")
+    if not (email or customer_id or telegram_id):
+        print("[DB] upsert ignorado (sem chave de identificação)")
         return
     sql = text("""
-        INSERT INTO subscribers (email, customer_id, subscription_id, plan, status, updated_at)
-        VALUES (:email, :customer_id, :subscription_id, :plan, :status, NOW())
+        INSERT INTO subscribers (email, telegram_id, customer_id, subscription_id, plan, status, updated_at)
+        VALUES (:email, :telegram_id, :customer_id, :subscription_id, :plan, :status, NOW())
         ON CONFLICT (email) DO UPDATE SET
+            telegram_id = COALESCE(EXCLUDED.telegram_id, subscribers.telegram_id),
             customer_id = COALESCE(EXCLUDED.customer_id, subscribers.customer_id),
             subscription_id = COALESCE(EXCLUDED.subscription_id, subscribers.subscription_id),
             plan = COALESCE(EXCLUDED.plan, subscribers.plan),
@@ -106,17 +114,18 @@ def upsert_subscriber(*, email: Optional[str], customer_id: Optional[str],
     with engine.begin() as conn:
         conn.execute(sql, dict(
             email=(email.lower() if email else None),
+            telegram_id=(str(telegram_id) if telegram_id else None),
             customer_id=customer_id,
             subscription_id=subscription_id,
             plan=plan,
             status=status
         ))
-    print(f"[DB] upsert {email or customer_id}: {status}")
+    print(f"[DB] upsert {email or customer_id or telegram_id}: {status}")
 
 def get_by_email(email: str) -> Optional[dict]:
     if not engine:
         return None
-    sql = text("SELECT email, customer_id, subscription_id, plan, status FROM subscribers WHERE email = :email")
+    sql = text("SELECT email, telegram_id, customer_id, subscription_id, plan, status FROM subscribers WHERE email = :email")
     with engine.begin() as conn:
         row = conn.execute(sql, {"email": email.lower()}).mappings().first()
         return dict(row) if row else None
@@ -133,25 +142,38 @@ def set_status_by_customer(customer_id: str, status: str, subscription_id: Optio
     """)
     with engine.begin() as conn:
         conn.execute(sql, {"status": status, "subscription_id": subscription_id, "customer_id": customer_id})
-    print(f"[DB] set status by customer {customer_id}: {status}")
+    print(f"[DB] status {customer_id} -> {status}")
+
+def set_telegram_for_email(email: str, telegram_id: str):
+    if not engine:
+        return
+    sql = text("""
+        UPDATE subscribers
+        SET telegram_id = :telegram_id,
+            updated_at = NOW()
+        WHERE email = :email
+    """)
+    with engine.begin() as conn:
+        conn.execute(sql, {"telegram_id": str(telegram_id), "email": email.lower()})
+    print(f"[DB] vinculado telegram_id {telegram_id} ao email {email}")
 
 # ======================
-# Textos (HTML p/ evitar erro de entidades)
+# Textos do bot
 # ======================
 HOW_IT_WORKS_TEXT = (
-    "ℹ️ <b>How It Works</b><br><br>"
-    "<b>1️⃣ Choose Your Plan</b><br>"
-    "Tap on <b>🌟 Plans</b> and pick Monthly, Quarterly, or Annual.<br><br>"
-    "<b>2️⃣ Complete Your Payment (Stripe)</b><br>"
-    "Use your email normally.<br><br>"
-    "<b>3️⃣ Unlock Your VIP Access</b><br>"
-    "Come back to this bot and tap <b>🔓 Unlock Access</b>.<br>"
-    "Enter the <b>email</b> you used in Stripe. If active, you'll receive your VIP invite(s).<br><br>"
-    "💡 Tip: If you have any issues, tap <b>🆘 Support</b>."
+    "ℹ️ **How It Works**\n\n"
+    "**1️⃣ Choose Your Plan**\n"
+    "Tap on **🌟 Plans** and pick Monthly, Quarterly, or Annual.\n\n"
+    "**2️⃣ Complete Your Payment (Stripe)**\n"
+    "Use your email normally.\n\n"
+    "**3️⃣ Unlock Your VIP Access**\n"
+    "Tap **🔓 Unlock Access** and type the same email you used on Stripe.\n"
+    "If active, you'll receive your VIP invite(s).\n\n"
+    "💡 If you need help, tap **🆘 Support**."
 )
 
 # ======================
-# Bot Handlers
+# BOT
 # ======================
 ASK_EMAIL = 10
 EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -163,261 +185,4 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🆔 My ID", callback_data="myid.show"),
         ],
         [
-            InlineKeyboardButton("🔓 Unlock Access", callback_data="unlock.access"),
-            InlineKeyboardButton("🌟 Plans", callback_data="plans.open")
-        ],
-        [
-            InlineKeyboardButton("🎁 Free Group", url="https://t.me/lukaeurope77"),
-            InlineKeyboardButton("ℹ️ How It Works", callback_data="howitworks")
-        ],
-        [
-            InlineKeyboardButton("🌐 Sales Website", url="https://lukamagiceurope.com")
-        ]
-    ]
-    await update.effective_message.reply_text(
-        "✅ Welcome! Please choose an option:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"
-    )
-
-async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    await update.effective_message.reply_text(
-        f"🆔 Your Telegram ID is: <code>{uid}</code>",
-        parse_mode="HTML"
-    )
-
-async def groupid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    chat_title = update.effective_chat.title or "Private Chat"
-    await update.effective_message.reply_text(
-        f"📌 Group Name: {chat_title}<br>🆔 Group ID: <code>{chat_id}</code>",
-        parse_mode="HTML"
-    )
-
-async def open_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    text = (
-        "🌟 <b>Luka Magic Europe – Plans</b><br><br>"
-        "💶 <s>€50</s> → <b>€30</b><br>"
-        "<i>€30 / month – 40% off</i><br><br>"
-        "📊 <s>€150</s> → <b>€80</b><br>"
-        "<i>€26.67 / month – 46% off</i><br><br>"
-        "🏆 <s>€600</s> → <b>€270</b><br>"
-        "<i>€22.50 / month – 55% off</i>"
-    )
-    keyboard = [
-        [InlineKeyboardButton("💶 Monthly – €30", url=STRIPE_MONTHLY_URL)],
-        [InlineKeyboardButton("📊 Quarterly – €80", url=STRIPE_QUARTERLY_URL)],
-        [InlineKeyboardButton("🏆 Annual – €270", url=STRIPE_ANNUAL_URL)],
-        [InlineKeyboardButton("⬅️ Back", callback_data="home.back")]
-    ]
-    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-
-async def back_to_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await start(update, context)
-
-async def show_how_it_works(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        text=HOW_IT_WORKS_TEXT,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="home.back")]])
-    )
-
-async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
-    if not VIP_GROUP_IDS:
-        return None
-    try:
-        expire_at = datetime.utcnow() + timedelta(hours=24)
-        lines = []
-        for gid in VIP_GROUP_IDS:
-            try:
-                link = await context.bot.create_chat_invite_link(
-                    chat_id=gid, expire_date=expire_at, member_limit=1
-                )
-                lines.append(f"• {link.invite_link}")
-            except Exception as e:
-                print(f"[INVITE] Falha ao criar convite para {gid}: {e}")
-        if lines:
-            return "🔗 Your VIP invites (1 use each, valid 24h):\n" + "\n".join(lines)
-    except Exception as e:
-        print(f"[INVITE] Erro geral: {e}")
-    return None
-
-async def unlock_access_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="home.back")]]
-    await query.edit_message_text(
-        text=(
-            "🔓 <b>Unlock Access</b><br><br>"
-            "Please type the <b>email</b> you used on Stripe."
-        ),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return ASK_EMAIL
-
-async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    email = (update.effective_message.text or "").strip().lower()
-    if not EMAIL_REGEX.match(email):
-        await update.effective_message.reply_text("⚠️ That doesn't look like a valid email. Try again, please.")
-        return ASK_EMAIL
-
-    sub = get_by_email(email)
-    if sub and sub.get("status") in ("active", "trialing"):
-        invites_text = await _generate_single_use_invites(context)
-        if invites_text:
-            await update.effective_message.reply_text(
-                f"✅ Access granted for <b>{email}</b>!<br>{invites_text}",
-                parse_mode="HTML", disable_web_page_preview=True
-            )
-        else:
-            await update.effective_message.reply_text(
-                f"✅ Access granted for <b>{email}</b>!<br>Here is your VIP invite:<br>{VIP_INVITE_LINK}",
-                parse_mode="HTML"
-            )
-        return ConversationHandler.END
-
-    await update.effective_message.reply_text(
-        "❌ I couldn't find an active subscription for this email.<br>"
-        "If you paid recently, wait a minute and try again, or tap Support and send your receipt.",
-        parse_mode="HTML"
-    )
-    return ConversationHandler.END
-
-async def unlock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text("Cancelled.")
-    return ConversationHandler.END
-
-async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = update.callback_query.data
-    if data == "plans.open":
-        return await open_plans(update, context)
-    if data == "home.back":
-        return await back_to_home(update, context)
-    if data == "howitworks":
-        return await show_how_it_works(update, context)
-    if data == "unlock.access":
-        return await unlock_access_prompt(update, context)
-    if data == "myid.show":
-        await update.callback_query.answer()
-        uid = update.effective_user.id
-        return await update.callback_query.edit_message_text(
-            text=f"🆔 Your Telegram ID is: <code>{uid}</code>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="home.back")]])
-        )
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text(text=f"✅ You clicked: {data}")
-
-# ======================
-# FastAPI + Telegram webhook
-# ======================
-app = FastAPI()
-tg_app: Application = ApplicationBuilder().token(TOKEN).build()
-
-@app.on_event("startup")
-async def _on_startup():
-    db_setup()
-    await tg_app.initialize()
-    if PUBLIC_URL and TOKEN:
-        url = f"{PUBLIC_URL}/telegram/{TOKEN}"
-        try:
-            await tg_app.bot.set_webhook(url=url, drop_pending_updates=True, allowed_updates=["message","callback_query"])
-            print(f"[PTB] Webhook set to {url}")
-        except Exception as e:
-            print(f"[PTB] set_webhook falhou: {e}")
-    await tg_app.start()
-    print("[PTB] iniciado dentro do FastAPI.")
-
-@app.on_event("shutdown")
-async def _on_shutdown():
-    await tg_app.stop()
-    await tg_app.shutdown()
-    print("[PTB] parado.")
-
-@app.get("/")
-async def health():
-    return {"ok": True, "service": "LukaMagicBOT + Stripe Webhook"}
-
-@app.post(f"/telegram/{TOKEN}")
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, tg_app.bot)
-    await tg_app.process_update(update)
-    return {"ok": True}
-
-# ======================
-# Stripe Webhook
-# ======================
-def _extract_email_from_session(session: dict) -> Optional[str]:
-    cd = session.get("customer_details") or {}
-    email = cd.get("email") or session.get("customer_email")
-    return email.lower() if email else None
-
-@app.post("/stripe/webhook")
-async def stripe_webhook(request: Request, stripe_signature: str = Header(None, alias="Stripe-Signature")):
-    if not STRIPE_WEBHOOK_SECRET:
-        raise HTTPException(status_code=500, detail="Webhook secret not configured")
-    payload = await request.body()
-    try:
-        event = stripe.Webhook.construct_event(payload=payload, sig_header=stripe_signature, secret=STRIPE_WEBHOOK_SECRET)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid signature: {e}")
-
-    etype = event.get("type")
-    obj = event["data"]["object"]
-
-    if etype == "checkout.session.completed":
-        email = _extract_email_from_session(obj)
-        customer_id = obj.get("customer")
-        subscription_id = obj.get("subscription")
-        plan = None
-        status = "active"
-        upsert_subscriber(email=email, customer_id=customer_id, subscription_id=subscription_id, plan=plan, status=status)
-
-    elif etype == "invoice.payment_succeeded":
-        customer_id = obj.get("customer")
-        subscription_id = obj.get("subscription")
-        # tenta descobrir email do customer (melhora matching do /unlock)
-        email = None
-        try:
-            if customer_id:
-                cust = stripe.Customer.retrieve(customer_id)
-                if cust and cust.get("email"):
-                    email = cust["email"].lower()
-        except Exception as e:
-            print(f"[Stripe] erro ao buscar customer {customer_id}: {e}")
-        upsert_subscriber(email=email, customer_id=customer_id, subscription_id=subscription_id, plan=None, status="active")
-
-    elif etype == "invoice.payment_failed":
-        customer_id = obj.get("customer")
-        set_status_by_customer(customer_id, "past_due", None)
-
-    elif etype == "customer.subscription.deleted":
-        customer_id = obj.get("customer")
-        set_status_by_customer(customer_id, "canceled", obj.get("id"))
-
-    return {"received": True}
-
-# ======================
-# Registrar handlers no TG app
-# ======================
-tg_app.add_handler(CommandHandler("start", start))
-tg_app.add_handler(CommandHandler("myid", cmd_myid))
-tg_app.add_handler(CommandHandler("groupid", groupid))
-tg_app.add_handler(CallbackQueryHandler(button_router))
-
-conv = ConversationHandler(
-    entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern="^unlock\\.access$")],
-    states={ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]},
-    fallbacks=[CommandHandler("cancel", unlock_cancel)],
-    allow_reentry=True,
-)
-tg_app.add_handler(conv)
+           

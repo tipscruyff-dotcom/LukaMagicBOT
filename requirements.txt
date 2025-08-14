@@ -1,6 +1,7 @@
-python-telegram-bot[webhooks]==21.*
+python-telegram-bot==21.*
 fastapi==0.111.*
 uvicorn==0.30.*
 stripe==10.*
 SQLAlchemy==2.*
 psycopg2-binary==2.*
+python-dotenv==1.*
