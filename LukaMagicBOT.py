@@ -21,6 +21,7 @@ from telegram.ext import (
 )
 
 from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi.responses import JSONResponse
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
@@ -137,7 +138,7 @@ def set_status_by_customer(customer_id: str, status: str, subscription_id: Optio
         conn.execute(sql, {"status": status, "subscription_id": subscription_id, "customer_id": customer_id})
     log.info("[DB] set status by customer %s: %s", customer_id, status)
 
-# ---------- TEXTOS (HTML p/ evitar erros de Markdown) ----------
+# ---------- TEXTOS (HTML para evitar erro de parse do Markdown) ----------
 HOW_IT_WORKS_TEXT = (
     "ℹ️ <b>How It Works</b>\n\n"
     "<b>1️⃣ Choose Your Plan</b>\n"
@@ -150,7 +151,7 @@ HOW_IT_WORKS_TEXT = (
     "💡 Tip: If you have any issues, tap <b>🆘 Support</b>."
 )
 
-# ---------- BOT HANDLERS ----------
+# ---------- BOT ----------
 ASK_EMAIL = 10
 EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -251,9 +252,6 @@ async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Op
         log.exception("[INVITE] Erro geral: %s", e)
     return None
 
-ASK_EMAIL = 10
-EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
-
 async def unlock_access_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -314,12 +312,48 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text(text=f"✅ You clicked: {data}")
 
-# ---------- ERROS ----------
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.exception("Exceção ao processar update %s: %s", getattr(update, "update_id", "?"), context.error)
 
-# ---------- FASTAPI ----------
+# ---------- FASTAPI + TELEGRAM MONTADO ----------
 app = FastAPI()
+tg_app: Application = ApplicationBuilder().token(TOKEN).build()
+
+# Handlers no app do Telegram
+tg_app.add_handler(CommandHandler("start", start))
+tg_app.add_handler(CommandHandler("myid", myid))
+tg_app.add_handler(CommandHandler("groupid", groupid))
+tg_app.add_handler(CallbackQueryHandler(button_router))
+conv = ConversationHandler(
+    entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern="^unlock\\.access$")],
+    states={ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]},
+    fallbacks=[CommandHandler("cancel", unlock_cancel)],
+    allow_reentry=True,
+    per_message=True,
+)
+tg_app.add_handler(conv)
+tg_app.add_error_handler(error_handler)
+
+# Monte o webhook do Telegram dentro da FastAPI
+app.mount(f"/{TOKEN}", tg_app.webhook_application())
+
+@app.on_event("startup")
+async def on_startup():
+    db_setup()
+    # Inicializa o app do Telegram e seta o webhook corretamente
+    await tg_app.initialize()
+    webhook_url = f"{PUBLIC_URL}/{TOKEN}"
+    await tg_app.bot.set_webhook(
+        url=webhook_url,
+        allowed_updates=["message", "callback_query"]
+    )
+    await tg_app.start()
+    log.info("[BOOT] Webhook setado: %s", webhook_url)
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await tg_app.stop()
+    await tg_app.shutdown()
 
 @app.get("/")
 async def health():
@@ -360,49 +394,4 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None, 
     elif etype == "customer.subscription.deleted":
         set_status_by_customer(obj.get("customer"), "canceled", obj.get("id"))
 
-    return {"received": True}
-
-# ---------- MAIN ----------
-def main():
-    if not TOKEN:
-        raise RuntimeError("BOT_TOKEN não definido. Configure no .env/Variables do Railway.")
-
-    try:
-        db_setup()
-    except OperationalError as e:
-        log.error("[DB] Erro ao conectar/criar tabela: %s", e)
-
-    application: Application = ApplicationBuilder().token(TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("myid", myid))
-    application.add_handler(CommandHandler("groupid", groupid))
-    application.add_handler(CallbackQueryHandler(button_router))
-
-    conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern="^unlock\\.access$")],
-        states={ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]},
-        fallbacks=[CommandHandler("cancel", unlock_cancel)],
-        allow_reentry=True,
-        per_message=True,
-    )
-    application.add_handler(conv)
-
-    application.add_error_handler(error_handler)
-
-    if os.getenv("LOCAL_POLLING", "0") == "1":
-        log.info("[BOT] Rodando em modo LOCAL (polling).")
-        application.run_polling()
-    else:
-        if not PUBLIC_URL:
-            raise RuntimeError("PUBLIC_URL não definido para webhook.")
-        log.info("[BOT] Rodando em modo WEBHOOK.")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.environ.get("PORT", "8080")),
-            url_path=TOKEN,
-            webhook_url=f"{PUBLIC_URL}/{TOKEN}"
-        )
-
-if __name__ == "__main__":
-    main()
+    return JSONResponse({"received": True})
