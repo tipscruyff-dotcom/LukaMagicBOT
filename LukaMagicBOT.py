@@ -276,6 +276,7 @@ async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Op
 async def unlock_access_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    print("[UNLOCK] Entrou no prompt via callback.")
     await query.edit_message_text(
         text=(
             "🔓 **Unlock Access**\n\n"
@@ -288,7 +289,7 @@ async def unlock_access_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     email = (update.effective_message.text or "").strip().lower()
-    print(f"[UNLOCK] Email digitado: {email}")
+    print(f"[UNLOCK] Mensagem recebida. Email: {email!r}")
     if not EMAIL_REGEX.match(email):
         await update.effective_message.reply_text("⚠️ That doesn't look like a valid email. Try again, please.")
         return ASK_EMAIL
@@ -320,26 +321,16 @@ async def unlock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("Cancelled.")
     return ConversationHandler.END
 
-# Router (pattern restrito – NÃO pega unlock.access)
-async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = update.callback_query.data
-    if data == "plans.open":
-        return await open_plans(update, context)
-    if data == "plans.back":
-        return await back_to_home(update, context)
-    if data == "howitworks":
-        return await show_how_it_works(update, context)
-    if data == "renew":
-        return await renew(update, context)
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text(text=f"✅ You clicked: {data}")
+# Handler de debug para qualquer texto (fora da conversa)
+async def echo_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = (update.effective_message.text or "").strip()
+    print(f"[DEBUG] Texto fora da conversa: {txt!r}")
 
 # ======================
 # FastAPI (Webhook Stripe + Telegram + Health)
 # ======================
 app = FastAPI()
 
-# Criamos a Application GLOBAL para o bot
 application: Application = ApplicationBuilder().token(TOKEN).build()
 
 # Handlers do bot
@@ -347,39 +338,45 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("myid", myid))
 application.add_handler(CommandHandler("groupid", groupid))
 
-# 1) ConversationHandler primeiro
+# 1) ConversationHandler primeiro — com per_* explícitos
 conv = ConversationHandler(
     entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern=r"^unlock\.access$")],
-    states={
-        ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]
-    },
+    states={ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]},
     fallbacks=[CommandHandler("cancel", unlock_cancel)],
     allow_reentry=True,
+    per_chat=True,
+    per_user=True,
+    per_message=False,
 )
 application.add_handler(conv)
 
-# 2) Router genérico depois (sem unlock.access)
+# 2) Router genérico (não pega unlock.access)
 application.add_handler(CallbackQueryHandler(
-    button_router,
-    pattern=r"^(plans\.open|plans\.back|howitworks|renew)$"
-))
+    open_plans, pattern=r"^plans\.open$"))
+application.add_handler(CallbackQueryHandler(
+    back_to_home, pattern=r"^plans\.back$"))
+application.add_handler(CallbackQueryHandler(
+    show_how_it_works, pattern=r"^howitworks$"))
+application.add_handler(CallbackQueryHandler(
+    renew, pattern=r"^renew$"))
+
+# 3) Debug global para qualquer texto que não esteja numa conversa
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_debug))
 
 @app.on_event("startup")
 async def on_startup():
-    # DB
     try:
         db_setup()
     except OperationalError as e:
         print(f"[DB] Erro ao conectar/criar tabela: {e}")
 
-    # Telegram bot
     await application.initialize()
     await application.start()
 
     if not PUBLIC_URL:
         raise RuntimeError("PUBLIC_URL não definido para webhook.")
     webhook_url = f"{PUBLIC_URL}/{TOKEN}"
-    await application.bot.set_webhook(webhook_url)
+    await application.bot.set_webhook(webhook_url, allowed_updates=["message", "callback_query"])
     print(f"[BOT] Webhook setado para {webhook_url}")
 
 @app.on_event("shutdown")
