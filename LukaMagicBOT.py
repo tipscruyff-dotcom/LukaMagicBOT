@@ -3,7 +3,9 @@ import re
 import stripe
 from datetime import datetime, timedelta
 from typing import Optional, List
+from html import escape  # ← para escapar e-mails/links em HTML
 
+# Carrega variáveis do .env (para rodar local sem export manual)
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -35,15 +37,16 @@ PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
-# Links Stripe
+# Links Stripe (você me passou)
 STRIPE_MONTHLY_URL   = "https://buy.stripe.com/8x29AVb3M4qn99xh0sawo00"
 STRIPE_QUARTERLY_URL = "https://buy.stripe.com/00w7sN4FocWT0D19y0awo01"
 STRIPE_ANNUAL_URL    = "https://buy.stripe.com/4gM3cx7RAg952L939Cawo02"
 STRIPE_RENEW_URL     = STRIPE_MONTHLY_URL
 
-# Fallback (se não der pra gerar 1-uso)
+# Link de convite fixo (fallback; preferimos convites 1-uso)
 VIP_INVITE_LINK = os.getenv("VIP_INVITE_LINK", "https://t.me/+SEU_LINK_VIP_AQUI")
 
+# Lista de grupos VIP (IDs separados por vírgula) para gerar convites 1-uso
 def _parse_group_ids(raw: str) -> List[int]:
     ids: List[int] = []
     for p in (raw or "").split(","):
@@ -72,6 +75,7 @@ if STRIPE_API_KEY:
 # ======================
 engine = None
 if DATABASE_URL:
+    # Railway às vezes fornece postgres:// ; SQLAlchemy aceita postgresql://
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
@@ -146,18 +150,18 @@ def set_status_by_customer(customer_id: str, status: str, subscription_id: Optio
     print(f"[DB] set status by customer {customer_id}: {status}")
 
 # ======================
-# Textos do bot
+# Textos do bot (HTML)
 # ======================
 HOW_IT_WORKS_TEXT = (
-    "ℹ️ **How It Works**\n\n"
-    "**1️⃣ Choose Your Plan**\n"
-    "Tap on **🌟 Plans** and pick Monthly, Quarterly, or Annual.\n\n"
-    "**2️⃣ Complete Your Payment (Stripe)**\n"
-    "Use your email normally.\n\n"
-    "**3️⃣ Unlock Your VIP Access**\n"
-    "Come back to this bot and tap **🔓 Unlock Access**.\n"
-    "Enter the **email** you used in Stripe. If active, you'll receive your VIP invite(s).\n\n"
-    "💡 Tip: If you have any issues, tap **🆘 Support**."
+    "ℹ️ <b>How It Works</b><br><br>"
+    "<b>1️⃣ Choose Your Plan</b><br>"
+    "Tap on <b>🌟 Plans</b> and pick Monthly, Quarterly, or Annual.<br><br>"
+    "<b>2️⃣ Complete Your Payment (Stripe)</b><br>"
+    "Use your email normally.<br><br>"
+    "<b>3️⃣ Unlock Your VIP Access</b><br>"
+    "Come back to this bot and tap <b>🔓 Unlock Access</b>.<br>"
+    "Enter the <b>email</b> you used in Stripe. If active, you'll receive your VIP invite(s).<br><br>"
+    "💡 Tip: If you have any issues, tap <b>🆘 Support</b>."
 )
 
 # ======================
@@ -190,24 +194,25 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.effective_message.reply_text(f"🆔 Your Telegram ID is: {user_id}")
 
+# /groupid — retorna o ID do chat/grupo atual
 async def groupid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    chat_title = update.effective_chat.title or "Private Chat"
+    chat_title = escape(update.effective_chat.title or "Private Chat")
     await update.effective_message.reply_text(
-        f"📌 Group Name: {chat_title}\n🆔 Group ID: `{chat_id}`",
-        parse_mode="Markdown"
+        f"📌 Group Name: {chat_title}<br>🆔 Group ID: <code>{chat_id}</code>",
+        parse_mode="HTML"
     )
 
 async def open_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     text = (
-        "🌟 <b>Luka Magic Europe – Plans</b>\n\n"
-        "💶 <s>€50</s> → <b>€30</b>\n"
-        "<i>€30 / month – 40% off</i>\n\n"
-        "📊 <s>€150</s> → <b>€80</b>\n"
-        "<i>€26.67 / month – 46% off</i>\n\n"
-        "🏆 <s>€600</s> → <b>€270</b>\n"
+        "🌟 <b>Luka Magic Europe – Plans</b><br><br>"
+        "💶 <s>€50</s> → <b>€30</b><br>"
+        "<i>€30 / month – 40% off</i><br><br>"
+        "📊 <s>€150</s> → <b>€80</b><br>"
+        "<i>€26.67 / month – 46% off</i><br><br>"
+        "🏆 <s>€600</s> → <b>€270</b><br>"
         "<i>€22.50 / month – 55% off</i>"
     )
     keyboard = [
@@ -216,7 +221,11 @@ async def open_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🏆 Annual – €270", url=STRIPE_ANNUAL_URL)],
         [InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]
     ]
-    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await query.edit_message_text(
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
 
 async def back_to_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -228,7 +237,7 @@ async def show_how_it_works(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await query.edit_message_text(
         text=HOW_IT_WORKS_TEXT,
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]])
     )
 
@@ -240,22 +249,27 @@ async def renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]
     ]
     await query.edit_message_text(
-        text="🔁 **Renew your subscription below:**",
+        text="<b>🔁 Renew your subscription below:</b>",
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 # ======================
-# Unlock Access (email → convites 1-uso)
+# Unlock Access (email)
 # ======================
 ASK_EMAIL = 10
 EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+    """
+    Gera links de convite 1-uso (member_limit=1) para cada chat_id em VIP_GROUP_IDS.
+    Retorna HTML seguro com <br>.
+    """
     if not VIP_GROUP_IDS:
         return None
+
     try:
-        expire_at = datetime.utcnow() + timedelta(hours=24)
+        expire_at = datetime.utcnow() + timedelta(hours=24)  # expira em 24h
         lines = []
         for gid in VIP_GROUP_IDS:
             try:
@@ -264,11 +278,11 @@ async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Op
                     expire_date=expire_at,
                     member_limit=1
                 )
-                lines.append(f"• {link.invite_link}")
+                lines.append(f"• {escape(link.invite_link)}")
             except Exception as e:
                 print(f"[INVITE] Falha ao criar convite para {gid}: {e}")
         if lines:
-            return "🔗 Your VIP invites (1 use each, valid 24h):\n" + "\n".join(lines)
+            return "🔗 Your VIP invites (1 use each, valid 24h):<br>" + "<br>".join(lines)
     except Exception as e:
         print(f"[INVITE] Erro geral: {e}")
     return None
@@ -276,38 +290,38 @@ async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Op
 async def unlock_access_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    print("[UNLOCK] Entrou no prompt via callback.")
     await query.edit_message_text(
         text=(
-            "🔓 **Unlock Access**\n\n"
-            "Please type the **email** you used on Stripe.\n"
+            "🔓 <b>Unlock Access</b><br><br>"
+            "Please type the <b>email</b> you used on Stripe.<br>"
             "If your subscription is active, I'll send your VIP invite(s)."
         ),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     return ASK_EMAIL
 
 async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     email = (update.effective_message.text or "").strip().lower()
-    print(f"[UNLOCK] Mensagem recebida. Email: {email!r}")
     if not EMAIL_REGEX.match(email):
         await update.effective_message.reply_text("⚠️ That doesn't look like a valid email. Try again, please.")
         return ASK_EMAIL
 
     sub = get_by_email(email)
-    print(f"[UNLOCK] DB lookup para {email}: {sub}")
     if sub and sub.get("status") in ("active", "trialing"):
-        invites_text = await _generate_single_use_invites(context)
-        if invites_text:
+        invites_html = await _generate_single_use_invites(context)
+        if invites_html:
             await update.effective_message.reply_text(
-                f"✅ Access granted for **{email}**!\n{invites_text}",
-                parse_mode="Markdown",
+                f"✅ Access granted for <b>{escape(email)}</b>!<br>{invites_html}",
+                parse_mode="HTML",
                 disable_web_page_preview=True
             )
         else:
+            safe_link = escape(VIP_INVITE_LINK)
             await update.effective_message.reply_text(
-                f"✅ Access granted for **{email}**!\nHere is your VIP invite:\n{VIP_INVITE_LINK}",
-                parse_mode="Markdown"
+                f"✅ Access granted for <b>{escape(email)}</b>!<br>"
+                f'Here is your VIP invite:<br><a href="{safe_link}">{safe_link}</a>',
+                parse_mode="HTML",
+                disable_web_page_preview=True
             )
         return ConversationHandler.END
 
@@ -321,81 +335,30 @@ async def unlock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("Cancelled.")
     return ConversationHandler.END
 
-# Handler de debug para qualquer texto (fora da conversa)
-async def echo_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = (update.effective_message.text or "").strip()
-    print(f"[DEBUG] Texto fora da conversa: {txt!r}")
+# Router dos botões
+async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = update.callback_query.data
+    if data == "plans.open":
+        return await open_plans(update, context)
+    if data == "plans.back":
+        return await back_to_home(update, context)
+    if data == "howitworks":
+        return await show_how_it_works(update, context)
+    if data == "renew":
+        return await renew(update, context)
+    if data == "unlock.access":
+        return await unlock_access_prompt(update, context)
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text(text=f"✅ You clicked: {escape(data)}")
 
 # ======================
-# FastAPI (Webhook Stripe + Telegram + Health)
+# FastAPI (Webhook Stripe + Health)
 # ======================
 app = FastAPI()
 
-application: Application = ApplicationBuilder().token(TOKEN).build()
-
-# Handlers do bot
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("myid", myid))
-application.add_handler(CommandHandler("groupid", groupid))
-
-# 1) ConversationHandler primeiro — com per_* explícitos
-conv = ConversationHandler(
-    entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern=r"^unlock\.access$")],
-    states={ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]},
-    fallbacks=[CommandHandler("cancel", unlock_cancel)],
-    allow_reentry=True,
-    per_chat=True,
-    per_user=True,
-    per_message=False,
-)
-application.add_handler(conv)
-
-# 2) Router genérico (não pega unlock.access)
-application.add_handler(CallbackQueryHandler(
-    open_plans, pattern=r"^plans\.open$"))
-application.add_handler(CallbackQueryHandler(
-    back_to_home, pattern=r"^plans\.back$"))
-application.add_handler(CallbackQueryHandler(
-    show_how_it_works, pattern=r"^howitworks$"))
-application.add_handler(CallbackQueryHandler(
-    renew, pattern=r"^renew$"))
-
-# 3) Debug global para qualquer texto que não esteja numa conversa
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_debug))
-
-@app.on_event("startup")
-async def on_startup():
-    try:
-        db_setup()
-    except OperationalError as e:
-        print(f"[DB] Erro ao conectar/criar tabela: {e}")
-
-    await application.initialize()
-    await application.start()
-
-    if not PUBLIC_URL:
-        raise RuntimeError("PUBLIC_URL não definido para webhook.")
-    webhook_url = f"{PUBLIC_URL}/{TOKEN}"
-    await application.bot.set_webhook(webhook_url, allowed_updates=["message", "callback_query"])
-    print(f"[BOT] Webhook setado para {webhook_url}")
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    await application.stop()
-    await application.shutdown()
-    print("[BOT] Finalizado.")
-
 @app.get("/")
 async def health():
-    return {"ok": True, "service": "LukaMagicBOT + Stripe Webhook + FastAPI"}
-
-# ====== ROTA TELEGRAM WEBHOOK ======
-@app.post(f"/{TOKEN}")
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return {"ok": True}
+    return {"ok": True, "service": "LukaMagicBOT + Stripe Webhook"}
 
 def _extract_email_from_session(session: dict) -> Optional[str]:
     cd = session.get("customer_details") or {}
@@ -407,7 +370,6 @@ def _extract_email_from_session(session: dict) -> Optional[str]:
         return email.lower()
     return None
 
-# ====== ROTA STRIPE WEBHOOK ======
 @app.post("/stripe/webhook")
 async def stripe_webhook(
     request: Request,
@@ -454,3 +416,54 @@ async def stripe_webhook(
         set_status_by_customer(customer_id, "canceled", obj.get("id"))
 
     return {"received": True}
+
+# ======================
+# Main
+# ======================
+def main():
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN não definido. Configure no .env ou nas Variables do Railway.")
+
+    try:
+        db_setup()
+    except OperationalError as e:
+        print(f"[DB] Erro ao conectar/criar tabela: {e}")
+
+    application: Application = ApplicationBuilder().token(TOKEN).build()
+
+    # Handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("myid", myid))
+    application.add_handler(CommandHandler("groupid", groupid))
+    application.add_handler(CallbackQueryHandler(button_router))
+
+    # Conversa do Unlock (email)
+    conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern="^unlock\\.access$")],
+        states={
+            ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]
+        },
+        fallbacks=[CommandHandler("cancel", unlock_cancel)],
+        allow_reentry=True,
+    )
+    application.add_handler(conv)
+
+    # Execução:
+    # - Local (polling): defina LOCAL_POLLING=1 no .env
+    # - Nuvem (webhook): padrão
+    if os.getenv("LOCAL_POLLING", "0") == "1":
+        print("[BOT] Rodando em modo LOCAL (polling).")
+        application.run_polling()
+    else:
+        if not PUBLIC_URL:
+            raise RuntimeError("PUBLIC_URL não definido para webhook.")
+        print("[BOT] Rodando em modo WEBHOOK.")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.environ.get("PORT", "8080")),
+            url_path=TOKEN,
+            webhook_url=f"{PUBLIC_URL}/{TOKEN}"
+        )
+
+if __name__ == "__main__":
+    main()
