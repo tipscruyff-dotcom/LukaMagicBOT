@@ -138,7 +138,7 @@ def set_status_by_customer(customer_id: str, status: str, subscription_id: Optio
         conn.execute(sql, {"status": status, "subscription_id": subscription_id, "customer_id": customer_id})
     log.info("[DB] set status by customer %s: %s", customer_id, status)
 
-# ---------- TEXTOS (HTML para evitar erro de parse do Markdown) ----------
+# ---------- TEXTOS (HTML para evitar erros de parse) ----------
 HOW_IT_WORKS_TEXT = (
     "ℹ️ <b>How It Works</b>\n\n"
     "<b>1️⃣ Choose Your Plan</b>\n"
@@ -319,7 +319,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 app = FastAPI()
 tg_app: Application = ApplicationBuilder().token(TOKEN).build()
 
-# Handlers no app do Telegram
 tg_app.add_handler(CommandHandler("start", start))
 tg_app.add_handler(CommandHandler("myid", myid))
 tg_app.add_handler(CommandHandler("groupid", groupid))
@@ -334,30 +333,45 @@ conv = ConversationHandler(
 tg_app.add_handler(conv)
 tg_app.add_error_handler(error_handler)
 
-# Monte o webhook do Telegram dentro da FastAPI
+# monta o webhook do Telegram como subapp ASGI
 app.mount(f"/{TOKEN}", tg_app.webhook_application())
 
 @app.on_event("startup")
 async def on_startup():
-    db_setup()
-    # Inicializa o app do Telegram e seta o webhook corretamente
-    await tg_app.initialize()
-    webhook_url = f"{PUBLIC_URL}/{TOKEN}"
-    await tg_app.bot.set_webhook(
-        url=webhook_url,
-        allowed_updates=["message", "callback_query"]
-    )
-    await tg_app.start()
-    log.info("[BOOT] Webhook setado: %s", webhook_url)
+    try:
+        db_setup()
+    except Exception as e:
+        log.exception("[BOOT] Erro ao preparar DB: %s", e)
+
+    try:
+        await tg_app.initialize()
+        webhook_url = f"{PUBLIC_URL}/{TOKEN}"
+        await tg_app.bot.set_webhook(
+            url=webhook_url,
+            allowed_updates=["message", "callback_query"]
+        )
+        await tg_app.start()
+        log.info("[BOOT] Webhook setado: %s", webhook_url)
+    except Exception as e:
+        # NÃO derruba o processo – loga e segue
+        log.exception("[BOOT] Falha ao iniciar Telegram app: %s", e)
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    await tg_app.stop()
-    await tg_app.shutdown()
+    try:
+        await tg_app.stop()
+        await tg_app.shutdown()
+    except Exception as e:
+        log.exception("[SHUTDOWN] Falha ao finalizar Telegram app: %s", e)
 
 @app.get("/")
 async def health():
     return {"ok": True, "service": "LukaMagicBOT + Stripe Webhook"}
+
+@app.get("/alive")
+async def alive():
+    # endpoint rápido para ver se o processo está de pé
+    return {"status": "alive"}
 
 def _extract_email_from_session(session: dict) -> Optional[str]:
     cd = session.get("customer_details") or {}
