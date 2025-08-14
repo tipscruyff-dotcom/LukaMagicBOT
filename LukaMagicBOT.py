@@ -30,10 +30,7 @@ from sqlalchemy.exc import OperationalError
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN não definido.")
-
-# Prefixo seguro do token para usar no path (remove os ':' etc)
 TOKEN_PREFIX = TOKEN.split(":")[0]
-
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
@@ -44,7 +41,7 @@ STRIPE_QUARTERLY_URL = "https://buy.stripe.com/00w7sN4FocWT0D19y0awo01"
 STRIPE_ANNUAL_URL    = "https://buy.stripe.com/4gM3cx7RAg952L939Cawo02"
 STRIPE_RENEW_URL     = STRIPE_MONTHLY_URL
 
-# Link de convite fixo (fallback)
+# Link fallback
 VIP_INVITE_LINK = os.getenv("VIP_INVITE_LINK", "https://t.me/+SEU_LINK_VIP_AQUI")
 
 def _parse_group_ids(raw: str) -> List[int]:
@@ -61,18 +58,11 @@ def _parse_group_ids(raw: str) -> List[int]:
 
 VIP_GROUP_IDS: List[int] = _parse_group_ids(os.getenv("VIP_GROUP_IDS", ""))
 
-# DB URL (Railway Postgres)
+# DB
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-
-# ======================
-# Stripe init
-# ======================
 if STRIPE_API_KEY:
     stripe.api_key = STRIPE_API_KEY
 
-# ======================
-# DB init + helpers
-# ======================
 engine = None
 if DATABASE_URL:
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
@@ -149,7 +139,7 @@ def set_status_by_customer(customer_id: str, status: str, subscription_id: Optio
     print(f"[DB] set status by customer {customer_id}: {status}")
 
 # ======================
-# Textos do bot (HTML)
+# Textos (HTML)
 # ======================
 HOW_IT_WORKS_TEXT = (
     "ℹ️ <b>How It Works</b><br><br>"
@@ -166,6 +156,9 @@ HOW_IT_WORKS_TEXT = (
 # ======================
 # Handlers do Bot
 # ======================
+ASK_EMAIL = 10
+EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
@@ -190,8 +183,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    await update.effective_message.reply_html(f"🆔 Your Telegram ID is: <code>{user_id}</code>")
+    await update.effective_message.reply_html(f"🆔 Your Telegram ID is: <code>{update.effective_user.id}</code>")
 
 async def groupid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -221,8 +213,7 @@ async def open_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def back_to_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    await update.callback_query.answer()
     await start(update, context)
 
 async def show_how_it_works(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -246,12 +237,6 @@ async def renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML"
     )
-
-# ======================
-# Unlock Access
-# ======================
-ASK_EMAIL = 10
-EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
     if not VIP_GROUP_IDS:
@@ -326,13 +311,11 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_how_it_works(update, context)
     if data == "renew":
         return await renew(update, context)
-    if data == "unlock.access":
-        return await unlock_access_prompt(update, context)
     await update.callback_query.answer()
     await update.callback_query.edit_message_text(text=f"✅ You clicked: {data}")
 
 # ======================
-# Construtor do Application (Telegram)
+# Monta Application (ordem IMPORTA!)
 # ======================
 def build_tg_app() -> Application:
     application: Application = ApplicationBuilder().token(TOKEN).build()
@@ -340,15 +323,19 @@ def build_tg_app() -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("myid", myid))
     application.add_handler(CommandHandler("groupid", groupid))
-    application.add_handler(CallbackQueryHandler(button_router))
 
+    # 1) ConversationHandler primeiro (para capturar unlock.access)
     conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern="^unlock\\.access$")],
+        entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern=r"^unlock\.access$")],
         states={ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]},
         fallbacks=[CommandHandler("cancel", unlock_cancel)],
         allow_reentry=True,
     )
     application.add_handler(conv)
+
+    # 2) Depois o roteador genérico
+    application.add_handler(CallbackQueryHandler(button_router))
+
     return application
 
 tg_app: Application = build_tg_app()
@@ -372,19 +359,13 @@ def _extract_email_from_session(session: dict) -> Optional[str]:
         return email.lower()
     return None
 
-# --- Stripe Webhook ---
 @app.post("/stripe/webhook")
-async def stripe_webhook(
-    request: Request,
-    stripe_signature: str = Header(None, alias="Stripe-Signature")
-):
+async def stripe_webhook(request: Request, stripe_signature: str = Header(None, alias="Stripe-Signature")):
     if not STRIPE_WEBHOOK_SECRET:
         raise HTTPException(status_code=500, detail="Webhook secret not configured")
     payload = await request.body()
     try:
-        event = stripe.Webhook.construct_event(
-            payload=payload, sig_header=stripe_signature, secret=STRIPE_WEBHOOK_SECRET
-        )
+        event = stripe.Webhook.construct_event(payload=payload, sig_header=stripe_signature, secret=STRIPE_WEBHOOK_SECRET)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid signature: {e}")
 
@@ -395,10 +376,7 @@ async def stripe_webhook(
         email = _extract_email_from_session(obj)
         customer_id = obj.get("customer")
         subscription_id = obj.get("subscription")
-        upsert_subscriber(
-            email=email, customer_id=customer_id, subscription_id=subscription_id,
-            plan=None, status="active"
-        )
+        upsert_subscriber(email=email, customer_id=customer_id, subscription_id=subscription_id, plan=None, status="active")
 
     elif etype == "invoice.payment_succeeded":
         customer_id = obj.get("customer")
@@ -415,10 +393,8 @@ async def stripe_webhook(
 
     return {"received": True}
 
-# --- Telegram Webhook via FastAPI ---
 @app.post(f"/telegram/{{token_prefix}}")
 async def telegram_webhook(token_prefix: str, request: Request):
-    # valida o prefixo para evitar chamadas aleatórias
     if token_prefix != TOKEN_PREFIX:
         raise HTTPException(status_code=403, detail="Forbidden")
     data = await request.json()
@@ -426,7 +402,6 @@ async def telegram_webhook(token_prefix: str, request: Request):
     await tg_app.process_update(update)
     return {"ok": True}
 
-# --- Lifecycle: inicia PTB e define webhook ---
 @app.on_event("startup")
 async def on_startup():
     try:
@@ -440,9 +415,7 @@ async def on_startup():
     if PUBLIC_URL:
         url = f"{PUBLIC_URL}/telegram/{TOKEN_PREFIX}"
         try:
-            await tg_app.bot.set_webhook(
-                url, allowed_updates=["message", "callback_query"]
-            )
+            await tg_app.bot.set_webhook(url, allowed_updates=["message", "callback_query"])
             print(f"[TG] Webhook setado em: {url}")
         except Exception as e:
             print(f"[TG] Falha ao setar webhook: {e}")
@@ -455,7 +428,6 @@ async def on_shutdown():
     except Exception as e:
         print(f"[TG] Erro ao finalizar app: {e}")
 
-# Execução local (opcional)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("LukaMagicBOT:app", host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
