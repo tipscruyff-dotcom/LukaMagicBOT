@@ -255,7 +255,7 @@ async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Op
     if not VIP_GROUP_IDS:
         return None
     try:
-        expire_at = datetime.utcnow() + timedelta(hours=24)  # expira em 24h
+        expire_at = datetime.utcnow() + timedelta(hours=24)
         lines = []
         for gid in VIP_GROUP_IDS:
             try:
@@ -320,7 +320,7 @@ async def unlock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("Cancelled.")
     return ConversationHandler.END
 
-# Router (AGORA com pattern restrito – NÃO pega unlock.access)
+# Router (pattern restrito – NÃO pega unlock.access)
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
     if data == "plans.open":
@@ -335,13 +335,70 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.edit_message_text(text=f"✅ You clicked: {data}")
 
 # ======================
-# FastAPI (Webhook Stripe + Health)
+# FastAPI (Webhook Stripe + Telegram + Health)
 # ======================
 app = FastAPI()
 
+# Criamos a Application GLOBAL para o bot
+application: Application = ApplicationBuilder().token(TOKEN).build()
+
+# Handlers do bot
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("myid", myid))
+application.add_handler(CommandHandler("groupid", groupid))
+
+# 1) ConversationHandler primeiro
+conv = ConversationHandler(
+    entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern=r"^unlock\.access$")],
+    states={
+        ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]
+    },
+    fallbacks=[CommandHandler("cancel", unlock_cancel)],
+    allow_reentry=True,
+)
+application.add_handler(conv)
+
+# 2) Router genérico depois (sem unlock.access)
+application.add_handler(CallbackQueryHandler(
+    button_router,
+    pattern=r"^(plans\.open|plans\.back|howitworks|renew)$"
+))
+
+@app.on_event("startup")
+async def on_startup():
+    # DB
+    try:
+        db_setup()
+    except OperationalError as e:
+        print(f"[DB] Erro ao conectar/criar tabela: {e}")
+
+    # Telegram bot
+    await application.initialize()
+    await application.start()
+
+    if not PUBLIC_URL:
+        raise RuntimeError("PUBLIC_URL não definido para webhook.")
+    webhook_url = f"{PUBLIC_URL}/{TOKEN}"
+    await application.bot.set_webhook(webhook_url)
+    print(f"[BOT] Webhook setado para {webhook_url}")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await application.stop()
+    await application.shutdown()
+    print("[BOT] Finalizado.")
+
 @app.get("/")
 async def health():
-    return {"ok": True, "service": "LukaMagicBOT + Stripe Webhook"}
+    return {"ok": True, "service": "LukaMagicBOT + Stripe Webhook + FastAPI"}
+
+# ====== ROTA TELEGRAM WEBHOOK ======
+@app.post(f"/{TOKEN}")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return {"ok": True}
 
 def _extract_email_from_session(session: dict) -> Optional[str]:
     cd = session.get("customer_details") or {}
@@ -353,6 +410,7 @@ def _extract_email_from_session(session: dict) -> Optional[str]:
         return email.lower()
     return None
 
+# ====== ROTA STRIPE WEBHOOK ======
 @app.post("/stripe/webhook")
 async def stripe_webhook(
     request: Request,
@@ -399,57 +457,3 @@ async def stripe_webhook(
         set_status_by_customer(customer_id, "canceled", obj.get("id"))
 
     return {"received": True}
-
-# ======================
-# Main
-# ======================
-def main():
-    if not TOKEN:
-        raise RuntimeError("BOT_TOKEN não definido. Configure no .env ou nas Variables do Railway.")
-
-    try:
-        db_setup()
-    except OperationalError as e:
-        print(f"[DB] Erro ao conectar/criar tabela: {e}")
-
-    application: Application = ApplicationBuilder().token(TOKEN).build()
-
-    # Handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("myid", myid))
-    application.add_handler(CommandHandler("groupid", groupid))
-
-    # 1) ConversationHandler primeiro!
-    conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern=r"^unlock\.access$")],
-        states={
-            ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]
-        },
-        fallbacks=[CommandHandler("cancel", unlock_cancel)],
-        allow_reentry=True,
-    )
-    application.add_handler(conv)
-
-    # 2) Depois o router genérico, com pattern que NÃO inclui unlock.access
-    application.add_handler(CallbackQueryHandler(
-        button_router,
-        pattern=r"^(plans\.open|plans\.back|howitworks|renew)$"
-    ))
-
-    # Execução
-    if os.getenv("LOCAL_POLLING", "0") == "1":
-        print("[BOT] Rodando em modo LOCAL (polling).")
-        application.run_polling()
-    else:
-        if not PUBLIC_URL:
-            raise RuntimeError("PUBLIC_URL não definido para webhook.")
-        print("[BOT] Rodando em modo WEBHOOK.")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.environ.get("PORT", "8080")),
-            url_path=TOKEN,
-            webhook_url=f"{PUBLIC_URL}/{TOKEN}"
-        )
-
-if __name__ == "__main__":
-    main()
