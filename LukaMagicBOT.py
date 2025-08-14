@@ -1,27 +1,24 @@
 import os
 import re
+import json
 import stripe
 from datetime import datetime, timedelta
 from typing import Optional, List
-from html import escape  # ← para escapar e-mails/links em HTML
+from html import escape
 
-# Carrega variáveis do .env (para rodar local sem export manual)
 from dotenv import load_dotenv
 load_dotenv()
 
+from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi.responses import JSONResponse
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    ApplicationBuilder,
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
+    Application, ApplicationBuilder,
+    CommandHandler, CallbackQueryHandler,
+    ContextTypes, ConversationHandler,
+    MessageHandler, filters,
 )
-
-from fastapi import FastAPI, Request, Header, HTTPException
 
 # ==== DB (PostgreSQL via SQLAlchemy) ====
 from sqlalchemy import create_engine, text
@@ -30,23 +27,20 @@ from sqlalchemy.exc import OperationalError
 # ======================
 # 🔐 Config
 # ======================
-TOKEN = os.getenv("BOT_TOKEN")
-PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
-
-# Stripe
+BOT_TOKEN   = os.getenv("BOT_TOKEN", "")
+PUBLIC_URL  = os.getenv("PUBLIC_URL", "").rstrip("/")
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
-# Links Stripe (você me passou)
+# Links Stripe
 STRIPE_MONTHLY_URL   = "https://buy.stripe.com/8x29AVb3M4qn99xh0sawo00"
 STRIPE_QUARTERLY_URL = "https://buy.stripe.com/00w7sN4FocWT0D19y0awo01"
 STRIPE_ANNUAL_URL    = "https://buy.stripe.com/4gM3cx7RAg952L939Cawo02"
 STRIPE_RENEW_URL     = STRIPE_MONTHLY_URL
 
-# Link de convite fixo (fallback; preferimos convites 1-uso)
+# Link de convite (fallback)
 VIP_INVITE_LINK = os.getenv("VIP_INVITE_LINK", "https://t.me/+SEU_LINK_VIP_AQUI")
 
-# Lista de grupos VIP (IDs separados por vírgula) para gerar convites 1-uso
 def _parse_group_ids(raw: str) -> List[int]:
     ids: List[int] = []
     for p in (raw or "").split(","):
@@ -61,21 +55,10 @@ def _parse_group_ids(raw: str) -> List[int]:
 
 VIP_GROUP_IDS: List[int] = _parse_group_ids(os.getenv("VIP_GROUP_IDS", ""))
 
-# DB URL (Railway Postgres)
+# DB URL
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-
-# ======================
-# Stripe init
-# ======================
-if STRIPE_API_KEY:
-    stripe.api_key = STRIPE_API_KEY
-
-# ======================
-# DB init + helpers
-# ======================
 engine = None
 if DATABASE_URL:
-    # Railway às vezes fornece postgres:// ; SQLAlchemy aceita postgresql://
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
@@ -150,7 +133,13 @@ def set_status_by_customer(customer_id: str, status: str, subscription_id: Optio
     print(f"[DB] set status by customer {customer_id}: {status}")
 
 # ======================
-# Textos do bot (HTML)
+# Stripe init
+# ======================
+if STRIPE_API_KEY:
+    stripe.api_key = STRIPE_API_KEY
+
+# ======================
+# Bot (handlers)
 # ======================
 HOW_IT_WORKS_TEXT = (
     "ℹ️ <b>How It Works</b><br><br>"
@@ -164,9 +153,6 @@ HOW_IT_WORKS_TEXT = (
     "💡 Tip: If you have any issues, tap <b>🆘 Support</b>."
 )
 
-# ======================
-# Bot UI
-# ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
@@ -194,7 +180,6 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.effective_message.reply_text(f"🆔 Your Telegram ID is: {user_id}")
 
-# /groupid — retorna o ID do chat/grupo atual
 async def groupid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     chat_title = escape(update.effective_chat.title or "Private Chat")
@@ -221,11 +206,7 @@ async def open_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🏆 Annual – €270", url=STRIPE_ANNUAL_URL)],
         [InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]
     ]
-    await query.edit_message_text(
-        text=text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"
-    )
+    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def back_to_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -235,11 +216,8 @@ async def back_to_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_how_it_works(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
-        text=HOW_IT_WORKS_TEXT,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]])
-    )
+    await query.edit_message_text(text=HOW_IT_WORKS_TEXT, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]]))
 
 async def renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -248,35 +226,22 @@ async def renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔁 Renew Now", url=STRIPE_RENEW_URL)],
         [InlineKeyboardButton("⬅️ Back", callback_data="plans.back")]
     ]
-    await query.edit_message_text(
-        text="<b>🔁 Renew your subscription below:</b>",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"
-    )
+    await query.edit_message_text(text="<b>🔁 Renew your subscription below:</b>",
+                                  reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
-# ======================
-# Unlock Access (email)
-# ======================
 ASK_EMAIL = 10
 EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
-    """
-    Gera links de convite 1-uso (member_limit=1) para cada chat_id em VIP_GROUP_IDS.
-    Retorna HTML seguro com <br>.
-    """
     if not VIP_GROUP_IDS:
         return None
-
     try:
-        expire_at = datetime.utcnow() + timedelta(hours=24)  # expira em 24h
+        expire_at = datetime.utcnow() + timedelta(hours=24)
         lines = []
         for gid in VIP_GROUP_IDS:
             try:
                 link = await context.bot.create_chat_invite_link(
-                    chat_id=gid,
-                    expire_date=expire_at,
-                    member_limit=1
+                    chat_id=gid, expire_date=expire_at, member_limit=1
                 )
                 lines.append(f"• {escape(link.invite_link)}")
             except Exception as e:
@@ -291,11 +256,9 @@ async def unlock_access_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     await query.edit_message_text(
-        text=(
-            "🔓 <b>Unlock Access</b><br><br>"
-            "Please type the <b>email</b> you used on Stripe.<br>"
-            "If your subscription is active, I'll send your VIP invite(s)."
-        ),
+        text=("🔓 <b>Unlock Access</b><br><br>"
+              "Please type the <b>email</b> you used on Stripe.<br>"
+              "If your subscription is active, I'll send your VIP invite(s)."),
         parse_mode="HTML"
     )
     return ASK_EMAIL
@@ -335,7 +298,6 @@ async def unlock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("Cancelled.")
     return ConversationHandler.END
 
-# Router dos botões
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
     if data == "plans.open":
@@ -352,14 +314,65 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.edit_message_text(text=f"✅ You clicked: {escape(data)}")
 
 # ======================
-# FastAPI (Webhook Stripe + Health)
+# FastAPI app + Bot em background
 # ======================
-app = FastAPI()
+app = FastAPI(title="LukaMagicBOT + Stripe Webhook")
+
+# PTB Application global
+ptb_app: Application | None = None
+
+@app.on_event("startup")
+async def _on_startup():
+    global ptb_app
+    db_setup()
+
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN não definido")
+
+    ptb_app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Handlers
+    ptb_app.add_handler(CommandHandler("start", start))
+    ptb_app.add_handler(CommandHandler("myid", myid))
+    ptb_app.add_handler(CommandHandler("groupid", groupid))
+    ptb_app.add_handler(CallbackQueryHandler(button_router))
+
+    conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern="^unlock\\.access$")],
+        states={ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]},
+        fallbacks=[CommandHandler("cancel", unlock_cancel)],
+        allow_reentry=True,
+    )
+    ptb_app.add_handler(conv)
+
+    # Inicializa o bot (sem servidor próprio)
+    await ptb_app.initialize()
+    await ptb_app.start()
+    print("[BOT] Inicializado dentro do FastAPI.")
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    global ptb_app
+    if ptb_app:
+        await ptb_app.stop()
+        await ptb_app.shutdown()
+        print("[BOT] Finalizado.")
 
 @app.get("/")
 async def health():
-    return {"ok": True, "service": "LukaMagicBOT + Stripe Webhook"}
+    return {"ok": True, "service": "LukaMagicBOT + Stripe Webhook + FastAPI"}
 
+# ====== Rota que recebe updates do Telegram (Webhook via FastAPI) ======
+@app.post(f"/telegram/{BOT_TOKEN}")
+async def telegram_webhook(request: Request):
+    if not ptb_app:
+        return JSONResponse({"ok": False, "error": "Bot not initialized"}, status_code=500)
+    data = await request.json()
+    update = Update.de_json(data, ptb_app.bot)
+    await ptb_app.process_update(update)
+    return {"ok": True}
+
+# ====== Stripe Webhook ======
 def _extract_email_from_session(session: dict) -> Optional[str]:
     cd = session.get("customer_details") or {}
     email = cd.get("email")
@@ -379,9 +392,7 @@ async def stripe_webhook(
         raise HTTPException(status_code=500, detail="Webhook secret not configured")
     payload = await request.body()
     try:
-        event = stripe.Webhook.construct_event(
-            payload=payload, sig_header=stripe_signature, secret=STRIPE_WEBHOOK_SECRET
-        )
+        event = stripe.Webhook.construct_event(payload=payload, sig_header=stripe_signature, secret=STRIPE_WEBHOOK_SECRET)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid signature: {e}")
 
@@ -394,13 +405,7 @@ async def stripe_webhook(
         subscription_id = obj.get("subscription")
         plan = None
         status = "active"
-        upsert_subscriber(
-            email=email,
-            customer_id=customer_id,
-            subscription_id=subscription_id,
-            plan=plan,
-            status=status
-        )
+        upsert_subscriber(email=email, customer_id=customer_id, subscription_id=subscription_id, plan=plan, status=status)
 
     elif etype == "invoice.payment_succeeded":
         customer_id = obj.get("customer")
@@ -416,54 +421,3 @@ async def stripe_webhook(
         set_status_by_customer(customer_id, "canceled", obj.get("id"))
 
     return {"received": True}
-
-# ======================
-# Main
-# ======================
-def main():
-    if not TOKEN:
-        raise RuntimeError("BOT_TOKEN não definido. Configure no .env ou nas Variables do Railway.")
-
-    try:
-        db_setup()
-    except OperationalError as e:
-        print(f"[DB] Erro ao conectar/criar tabela: {e}")
-
-    application: Application = ApplicationBuilder().token(TOKEN).build()
-
-    # Handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("myid", myid))
-    application.add_handler(CommandHandler("groupid", groupid))
-    application.add_handler(CallbackQueryHandler(button_router))
-
-    # Conversa do Unlock (email)
-    conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern="^unlock\\.access$")],
-        states={
-            ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, unlock_access_check_email)]
-        },
-        fallbacks=[CommandHandler("cancel", unlock_cancel)],
-        allow_reentry=True,
-    )
-    application.add_handler(conv)
-
-    # Execução:
-    # - Local (polling): defina LOCAL_POLLING=1 no .env
-    # - Nuvem (webhook): padrão
-    if os.getenv("LOCAL_POLLING", "0") == "1":
-        print("[BOT] Rodando em modo LOCAL (polling).")
-        application.run_polling()
-    else:
-        if not PUBLIC_URL:
-            raise RuntimeError("PUBLIC_URL não definido para webhook.")
-        print("[BOT] Rodando em modo WEBHOOK.")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.environ.get("PORT", "8080")),
-            url_path=TOKEN,
-            webhook_url=f"{PUBLIC_URL}/{TOKEN}"
-        )
-
-if __name__ == "__main__":
-    main()
