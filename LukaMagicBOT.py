@@ -29,7 +29,6 @@ from sqlalchemy.exc import OperationalError
 # ======================
 # 🔐 Config
 # ======================
-# SEM valor fixo: sempre via env (.env local ou Railway)
 TOKEN = os.getenv("BOT_TOKEN")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 
@@ -37,7 +36,7 @@ PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
-# Links Stripe (você me passou)
+# Links Stripe
 STRIPE_MONTHLY_URL   = "https://buy.stripe.com/8x29AVb3M4qn99xh0sawo00"
 STRIPE_QUARTERLY_URL = "https://buy.stripe.com/00w7sN4FocWT0D19y0awo01"
 STRIPE_ANNUAL_URL    = "https://buy.stripe.com/4gM3cx7RAg952L939Cawo02"
@@ -46,8 +45,7 @@ STRIPE_RENEW_URL     = STRIPE_MONTHLY_URL
 # Link de convite fixo (fallback; preferimos convites 1-uso por grupo)
 VIP_INVITE_LINK = os.getenv("VIP_INVITE_LINK", "https://t.me/+SEU_LINK_VIP_AQUI")
 
-# Lista de grupos VIP (IDs separados por vírgula) para gerar convites 1-uso
-# Ex.: VIP_GROUP_IDS="-1002697485775,-4927852198,-1002848196398,-1002854158242,-1002753765919"
+# Lista de grupos VIP (IDs separados por vírgula)
 def _parse_group_ids(raw: str) -> List[int]:
     ids: List[int] = []
     for p in (raw or "").split(","):
@@ -256,29 +254,21 @@ async def renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ======================
-# Unlock Access (Opção B com convites 1-uso)
+# Unlock Access (email -> convites 1 uso)
 # ======================
 ASK_EMAIL = 10
 EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 async def _generate_single_use_invites(context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
-    """
-    Gera links de convite 1-uso (member_limit=1) para cada chat_id em VIP_GROUP_IDS.
-    Necessita que o bot seja ADMIN em todos os grupos.
-    Retorna um texto com a lista de convites, ou None se não conseguir gerar.
-    """
     if not VIP_GROUP_IDS:
         return None
-
     try:
-        expire_at = datetime.utcnow() + timedelta(hours=24)  # expira em 24h
+        expire_at = datetime.utcnow() + timedelta(hours=24)
         lines = []
         for gid in VIP_GROUP_IDS:
             try:
                 link = await context.bot.create_chat_invite_link(
-                    chat_id=gid,
-                    expire_date=expire_at,
-                    member_limit=1
+                    chat_id=gid, expire_date=expire_at, member_limit=1
                 )
                 lines.append(f"• {link.invite_link}")
             except Exception as e:
@@ -310,7 +300,6 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
 
     sub = get_by_email(email)
     if sub and sub.get("status") in ("active", "trialing"):
-        # Tenta convites 1-uso para TODOS os grupos; se falhar, cai no link fixo
         invites_text = await _generate_single_use_invites(context)
         if invites_text:
             await update.effective_message.reply_text(
@@ -335,7 +324,7 @@ async def unlock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("Cancelled.")
     return ConversationHandler.END
 
-# Router dos botões
+# Router dos botões (genérico) — NÃO tratar unlock.access aqui
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
     if data == "plans.open":
@@ -346,8 +335,6 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_how_it_works(update, context)
     if data == "renew":
         return await renew(update, context)
-    if data == "unlock.access":
-        return await unlock_access_prompt(update, context)
     await update.callback_query.answer()
     await update.callback_query.edit_message_text(text=f"✅ You clicked: {data}")
 
@@ -370,11 +357,17 @@ def _extract_email_from_session(session: dict) -> Optional[str]:
         return email.lower()
     return None
 
+# Aceita /stripe/webhook (recomendado)
 @app.post("/stripe/webhook")
-async def stripe_webhook(
-    request: Request,
-    stripe_signature: str = Header(None, alias="Stripe-Signature")
-):
+async def stripe_webhook(request: Request, stripe_signature: str = Header(None, alias="Stripe-Signature")):
+    return await _handle_stripe(request, stripe_signature)
+
+# E também /stripe_webhook (caso esteja assim no Stripe)
+@app.post("/stripe_webhook")
+async def stripe_webhook_alt(request: Request, stripe_signature: str = Header(None, alias="Stripe-Signature")):
+    return await _handle_stripe(request, stripe_signature)
+
+async def _handle_stripe(request: Request, stripe_signature: str):
     if not STRIPE_WEBHOOK_SECRET:
         raise HTTPException(status_code=500, detail="Webhook secret not configured")
     payload = await request.body()
@@ -392,14 +385,12 @@ async def stripe_webhook(
         email = _extract_email_from_session(obj)
         customer_id = obj.get("customer")
         subscription_id = obj.get("subscription")
-        plan = None
-        status = "active"
         upsert_subscriber(
             email=email,
             customer_id=customer_id,
             subscription_id=subscription_id,
-            plan=plan,
-            status=status
+            plan=None,
+            status="active"
         )
 
     elif etype == "invoice.payment_succeeded":
@@ -435,9 +426,8 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("myid", myid))
     application.add_handler(CommandHandler("groupid", groupid))
-    application.add_handler(CallbackQueryHandler(button_router))
 
-    # Conversa do Unlock (email)
+    # Conversa do Unlock (entry point via callback "unlock.access")
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(unlock_access_prompt, pattern="^unlock\\.access$")],
         states={
@@ -448,9 +438,10 @@ def main():
     )
     application.add_handler(conv)
 
+    # Handler genérico de botões (vem DEPOIS, para não engolir o unlock.access)
+    application.add_handler(CallbackQueryHandler(button_router))
+
     # Execução:
-    # - Local (polling): defina LOCAL_POLLING=1 no .env
-    # - Nuvem (webhook): padrão
     if os.getenv("LOCAL_POLLING", "0") == "1":
         print("[BOT] Rodando em modo LOCAL (polling).")
         application.run_polling()
