@@ -1,4 +1,6 @@
 import os
+import csv, io
+from fastapi.responses import StreamingResponse
 import re
 import logging
 import asyncio
@@ -683,7 +685,7 @@ async def admin_list_subscriptions(request: Request):
     rows = "".join(_subscription_row(s) for s in subs)
     rows_html = rows if rows else '<tr><td colspan=9 class="muted">No records</td></tr>'
     body = f"""
-    <div class=\"row\"><h1 style=\"margin-right:auto\">Subscriptions</h1><a class=\"button\" href=\"/admin/subscriptions/new\">New</a><a class=\"button\" href=\"/admin/logout\">Logout</a></div>
+    <div class=\"row\"><h1 style=\"margin-right:auto\">Subscriptions</h1><a class=\"button\" href=\"/admin/subscriptions/new\">New</a><a class=\"button\" href=\"/admin/subscriptions/export.csv\">Export CSV</a><a class=\"button\" href=\"/admin/logout\">Logout</a></div>
     <table><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Telegram ID</th><th>Plan</th><th>Status</th><th>Created</th><th>Expires</th><th>Actions</th></tr></thead><tbody>{rows_html}</tbody></table>
     """
     return HTMLResponse(_html_page("Subscriptions", body))
@@ -714,6 +716,47 @@ async def admin_edit_subscription_form(request: Request, sub_id: int):
     <form method=\"post\" action=\"/admin/subscriptions/{sub.id}\">\n<div class=\"row\">\n<label>Name <input name=\"full_name\" value=\"{val(sub.full_name)}\"/></label>\n<label>Email <input name=\"email\" value=\"{val(sub.email)}\" required/></label>\n<label>Telegram ID <input name=\"telegram_user_id\" value=\"{val(sub.telegram_user_id)}\"/></label>\n<label>Plan <select name=\"plan_type\"><option {'selected' if sub.plan_type=='monthly' else ''} value=\"monthly\">monthly</option><option {'selected' if sub.plan_type=='quarterly' else ''} value=\"quarterly\">quarterly</option><option {'selected' if sub.plan_type=='annual' else ''} value=\"annual\">annual</option></select></label>\n<label>Status <select name=\"status\"><option {'selected' if sub.status=='active' else ''} value=\"active\">active</option><option {'selected' if sub.status=='past_due' else ''} value=\"past_due\">past_due</option><option {'selected' if sub.status=='canceled' else ''} value=\"canceled\">canceled</option></select></label>\n<label>Expires at (YYYY-MM-DD) <input name=\"expires_at\" value=\"{expires_val}\"/></label>\n<input type=\"submit\" value=\"Save\"/>\n</div>\n</form>
     """
     return HTMLResponse(_html_page("Edit Subscription", body))
+
+# Nova rota de exportação CSV para admin subscriptions
+@app.get("/admin/subscriptions/export.csv")
+async def admin_export_subscriptions_csv(request: Request):
+    _require_admin(request)
+    with SessionLocal() as db:
+        subs = db.query(models.Subscription).order_by(models.Subscription.id.asc()).all()
+
+    def fmt_dt(dt):
+        try:
+            # YYYY-MM-DD HH:MM:SS (sem timezone, compatível com Excel)
+            return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+        except Exception:
+            return str(dt) if dt else ""
+
+    def fmt_date(dt):
+        try:
+            return dt.date().isoformat() if dt else ""
+        except Exception:
+            return dt.isoformat() if dt else ""
+
+    # CSV em memória com BOM para Excel
+    sio = io.StringIO()
+    sio.write("\ufeff")
+    writer = csv.writer(sio)
+    writer.writerow(["ID", "Name", "Email", "Telegram ID", "Plan", "Status", "Created", "Expires"])
+    for s in subs:
+        writer.writerow([
+            s.id,
+            (s.full_name or ""),
+            (s.email or ""),
+            (s.telegram_user_id or ""),
+            (s.plan_type or ""),
+            (s.status or ""),
+            fmt_dt(getattr(s, "created_at", None)),
+            fmt_date(getattr(s, "expires_at", None)),
+        ])
+
+    filename = f"subscriptions_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(iter([sio.getvalue()]), media_type="text/csv; charset=utf-8", headers=headers)
 
 
 def _parse_date_or_none(s: str):
