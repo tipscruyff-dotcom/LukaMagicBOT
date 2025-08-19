@@ -1,0 +1,11 @@
+python-telegram-bot[webhooks]==21.*
+fastapi==0.111.*
+uvicorn==0.30.*
+requests
+psycopg2-binary
+sqlalchemy
+pytest
+python-dotenv==1.*
+stripe==8.*
+python-multipart==0.0.*
+itsdangerous==2.2.0
