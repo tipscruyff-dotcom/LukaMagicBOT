@@ -1,0 +1,148 @@
+<div style="margin-bottom: 20px;">
+    <h1>🚫 Auto Removal Dashboard</h1>
+    <div class="nav-buttons" style="margin: 10px 0;">
+        <a href="/admin/data" style="margin-right: 10px;">← Data Viewer</a>
+        <a href="/admin/subscriptions" style="margin-right: 10px;">← Admin</a>
+        <a href="/admin/removal/test-notifications" style="margin-right: 10px;">📱 Test Notifications</a>
+        <a href="/admin/removal/diagnose" style="margin-right: 10px;">🔍 System Diagnosis</a>
+        <a href="/admin/removal/debug-specific" style="margin-right: 10px;">🎯 Debug Specific Users</a>
+        <a href="/admin/logout">🚪 Logout</a>
+    </div>
+</div>
+
+<h2>🕐 Server Time & Schedule</h2>
+<div class="alert-info" style="padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #0284c7;">
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+        <div>
+            <p><strong>🕐 Current Server Time:</strong></p>
+            <p id="server-time" style="font-size: 1.2em; font-weight: 700; color: #1e40af;">{{ server_time_str }}</p>
+        </div>
+        <div>
+            <p><strong>⏰ Next Automatic Cleanup:</strong></p>
+            <p class="schedule-info" style="font-size: 1.1em; font-weight: 600; color: #059669;">{{ next_cleanup_str }}</p>
+            <p class="schedule-info" style="font-size: 0.9em;">({{ hours_until_cleanup }} hours from now)</p>
+        </div>
+    </div>
+</div>
+
+<h2>🎛️ Manual Controls</h2>
+<div class="alert-warning manual-controls" style="padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #f59e0b;">
+    <div style="display: flex; gap: 15px; align-items: center;">
+        <div style="flex: 1;">
+            <h3 style="margin: 0 0 5px 0; color: #92400e;">⚡ Run Cleanup Now</h3>
+            <p style="margin: 0; color: #78350f; font-size: 0.9em; font-weight: 500;">Execute the cleanup process immediately (removes expired users)</p>
+        </div>
+        <div>
+            <a href="/admin/removal/execute-now" 
+               style="background: #dc2626; color: white; padding: 10px 20px; font-weight: bold; border-radius: 6px; text-decoration: none; display: inline-block;" 
+               onclick="return confirm('This will immediately remove all expired users from VIP groups and send renewal DMs. Continue?');">
+               🚫 Run Cleanup Now
+            </a>
+        </div>
+    </div>
+</div>
+
+<h2>⚙️ System Status</h2>
+<div class="status-section" style="padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+    <p><strong>Scheduler:</strong> {{ scheduler_status }}</p>
+    <p><strong>🚫 Cleanup Time:</strong> Daily at {{ cleanup_time }}:00 UTC</p>
+    <p><strong>📱 Notification Time:</strong> Daily at {{ notification_time }}:00 UTC</p>
+    <p><strong>⏰ Grace Period:</strong> {{ grace_period }} days</p>
+    <p><strong>📱 Expiry Notifications:</strong> {{ notifications_status }}</p>
+    <p><strong>🧪 Test Mode:</strong> {{ test_mode }}</p>
+    <p><strong>💾 Database:</strong> {{ database_status }}</p>
+</div>
+
+<script>
+    // Update server time every second
+    function updateServerTime() {
+        const now = new Date();
+        const utcTime = now.toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
+        document.getElementById('server-time').textContent = utcTime;
+    }
+    
+    // Update immediately and then every second
+    updateServerTime();
+    setInterval(updateServerTime, 1000);
+</script>
+
+<h2>📊 Statistics</h2>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px;">
+    <div class="stats-card" style="background: #22c55e; color: white; padding: 15px; border-radius: 8px; text-align: center;">
+        <h3 style="font-weight: 800; text-shadow: 0 1px 3px rgba(0,0,0,0.2);">{{ success_logs }}</h3>
+        <p style="font-weight: 600; opacity: 0.95;">Successful</p>
+    </div>
+    <div class="stats-card" style="background: #ef4444; color: white; padding: 15px; border-radius: 8px; text-align: center;">
+        <h3 style="font-weight: 800; text-shadow: 0 1px 3px rgba(0,0,0,0.2);">{{ error_logs }}</h3>
+        <p style="font-weight: 600; opacity: 0.95;">Errors</p>
+    </div>
+    <div class="stats-card" style="background: #f59e0b; color: white; padding: 15px; border-radius: 8px; text-align: center;">
+        <h3 style="font-weight: 800; text-shadow: 0 1px 3px rgba(0,0,0,0.2);">{{ whitelisted_logs }}</h3>
+        <p style="font-weight: 600; opacity: 0.95;">Whitelisted</p>
+    </div>
+    <div class="stats-card" style="background: #6b7280; color: white; padding: 15px; border-radius: 8px; text-align: center;">
+        <h3 style="font-weight: 800; text-shadow: 0 1px 3px rgba(0,0,0,0.2);">{{ total_logs }}</h3>
+        <p style="font-weight: 600; opacity: 0.95;">Total Logs</p>
+    </div>
+</div>
+
+<h2>🔒 Whitelist Management</h2>
+<form method="post" action="/admin/whitelist/add" class="alert-info" style="margin-bottom: 20px; padding: 15px; border-radius: 8px;">
+    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: end;">
+        <div>
+            <label>Email:</label>
+            <input type="email" name="email" required>
+        </div>
+        <div>
+            <label>Reason:</label>
+            <input type="text" name="reason" placeholder="e.g., VIP member, staff" required>
+        </div>
+        <div>
+            <label>Added by:</label>
+            <input type="text" name="added_by" value="admin" required>
+        </div>
+        <div>
+            <input type="submit" value="Add to Whitelist">
+        </div>
+    </div>
+</form>
+
+<div class="whitelist-section" style="overflow-x: auto;">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Email</th>
+                <th>Telegram ID</th>
+                <th>Reason</th>
+                <th>Added by</th>
+                <th>Created</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{ whitelist_html }}
+        </tbody>
+    </table>
+</div>
+
+<h2>📋 Removal Logs ({{ total_logs }} recent)</h2>
+<div class="logs-section" style="overflow-x: auto;">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Email</th>
+                <th>Telegram ID</th>
+                <th>Reason</th>
+                <th>Status</th>
+                <th>DM Sent</th>
+                <th>Date</th>
+                <th>Error</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{ logs_html }}
+        </tbody>
+    </table>
+</div>

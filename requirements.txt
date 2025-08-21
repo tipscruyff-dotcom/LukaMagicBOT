@@ -9,3 +9,4 @@ python-dotenv==1.*
 stripe==8.*
 python-multipart==0.0.*
 itsdangerous==2.2.0
+apscheduler==3.10.*

@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <title>{{ title }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <style>
+        /* CSS Variables for consistent theming */
+        :root {
+            /* Background Colors */
+            --bg-primary: #0b1220;
+            --bg-secondary: #0f172a;
+            --bg-tertiary: #1f2937;
+            --bg-dark: rgb(8, 10, 13);
+            --bg-alert: #222025;
+            
+            /* Text Colors */
+            --text-primary: #f1f5f9;
+            --text-secondary: #e2e8f0;
+            --text-muted: #cbd5e1;
+            --text-dim: #94a3b8;
+            
+            /* Border Colors */
+            --border-primary: #1f2937;
+            --border-secondary: #374151;
+            --border-accent: #6b7280;
+            
+            /* Status Colors */
+            --color-success: #10b981;
+            --color-error: #ef4444;
+            --color-warning: #f59e0b;
+            --color-info: #3b82f6;
+            
+            /* Interactive Colors */
+            --color-primary: #6366f1;
+            --color-primary-hover: #4f46e5;
+            --color-danger: #ef4444;
+            --color-link: #60a5fa;
+            --color-link-hover: #93c5fd;
+        }
+
+        /* Base */
+        body {
+            background: var(--bg-primary);
+            color: var(--text-secondary);
+            font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Arial, sans-serif;
+            max-width: 1100px;
+            margin: 32px auto;
+            padding: 0 16px;
+            line-height: 1.6;
+        }
+        
+        /* Text colors using CSS variables */
+        h1, h2, h3, h4, h5, h6 {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+        
+        p {
+            color: var(--text-muted);
+            line-height: 1.6;
+        }
+        
+        .muted { 
+            color: var(--text-dim); 
+        }
+        
+        .row { 
+            display: flex; 
+            gap: 10px; 
+            align-items: center; 
+            flex-wrap: wrap; 
+        }
+        
+        /* Links with better visibility */
+        a {
+            color: var(--color-link);
+            text-decoration: underline;
+        }
+        
+        a:hover {
+            color: var(--color-link-hover);
+        }
+
+        /* Cards */
+        .card {
+            background: #0f172a;
+            border: 1px solid #1f2937;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 6px 24px rgba(0,0,0,.25);
+        }
+
+        /* Table */
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        th, td {
+            padding: 12px;
+            border-bottom: 1px solid #1f2937;
+            text-align: left;
+        }
+        th {
+            background: #111827;
+            color: #f1f5f9;
+            text-transform: uppercase;
+            font-size: 12px;
+            letter-spacing: .6px;
+            font-weight: 600;
+        }
+        tr:hover td { background: #0e1626; }
+
+        /* Forms */
+        label {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            font-size: 13px;
+            color: #cbd5e1;
+        }
+        input, select {
+            width: 100%;
+            background: #0b1220;
+            color: #e2e8f0;
+            border: 1px solid #1f2937;
+            border-radius: 8px;
+            padding: 10px;
+        }
+        form { margin: 0; }
+
+        /* Buttons */
+        a.button, button, input[type=submit] {
+            background: #6366f1;
+            color: #fff;
+            border: none;
+            padding: 9px 14px;
+            border-radius: 8px;
+            text-decoration: none;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        a.button:hover, button:hover, input[type=submit]:hover {
+            filter: brightness(1.1);
+        }
+        .danger { background: #ef4444; }
+
+        /* CORREÇÕES DE ACESSIBILIDADE */
+        /* Server Time & Schedule - Melhor contraste */
+        #server-time {
+            color: #1e40af !important;
+            font-weight: 700 !important;
+            text-shadow: 0 1px 2px rgba(255,255,255,0.8);
+        }
+        .schedule-info {
+            color: #1f2937 !important;
+            font-weight: 600;
+        }
+
+        /* System Status - Indicadores mais visíveis */
+        .status-section {
+            background: #1f2937 !important;
+            border: 1px solid #374151;
+        }
+        .status-section p {
+            color: #e5e7eb !important;
+            font-weight: 500;
+        }
+        .status-section strong {
+            color: #f9fafb !important;
+            font-weight: 700;
+        }
+
+        /* Manual Controls - Texto mais escuro */
+        .manual-controls {
+            background: #fef3c7 !important;
+        }
+        .manual-controls h3 {
+            color: #92400e !important;
+            font-weight: 700;
+        }
+        .manual-controls p {
+            color: #78350f !important;
+            font-weight: 500;
+        }
+
+        /* Statistics Cards - Melhor legibilidade */
+        .stats-card {
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
+        }
+        .stats-card h3 {
+            font-weight: 800 !important;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        }
+        .stats-card p {
+            font-weight: 600 !important;
+            opacity: 0.95;
+        }
+
+        /* Whitelist Table - Tema escuro consistente */
+        .whitelist-section table th {
+            background: #374151 !important;
+            color: #f9fafb !important;
+            font-weight: 700;
+        }
+        .whitelist-section table td {
+            color: #e5e7eb !important;
+            background: #1f2937;
+        }
+        .whitelist-section table tr:hover td {
+            background: #374151 !important;
+        }
+
+        /* Removal Logs - Tema escuro consistente */
+        .logs-section table th {
+            background: #374151 !important;
+            color: #f9fafb !important;
+        }
+        .logs-section table td {
+            background: #1f2937;
+            color: #e5e7eb !important;
+        }
+        .logs-section table tr:hover td {
+            background: #374151 !important;
+        }
+
+        /* Navigation - Botões mais visíveis */
+        .nav-buttons a {
+            background: #4f46e5 !important;
+            color: #ffffff !important;
+            font-weight: 600;
+            box-shadow: 0 2px 8px rgba(79,70,229,0.3);
+        }
+        .nav-buttons a:hover {
+            background: #4338ca !important;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(79,70,229,0.4);
+        }
+
+        /* Alerts e Status - Tons escuros consistentes */
+        .alert-success {
+            background: #222025 !important;
+            color: #10b981 !important;
+            border: 1px solid #10b981;
+        }
+        .alert-error {
+            background: #222025 !important;
+            color: #ef4444 !important;
+            border: 1px solid #ef4444;
+        }
+        .alert-warning {
+            background: #222025 !important;
+            color: #f59e0b !important;
+            border: 1px solid #f59e0b;
+        }
+        .alert-info {
+            background: #222025 !important;
+            color: #3b82f6 !important;
+            border: 1px solid #3b82f6;
+        }
+        
+        /* Diagnosis page specific styles */
+        .diagnosis-section {
+            background: rgb(8, 10, 13) !important;
+            border: 1px solid #374151;
+            color: #e5e7eb !important;
+        }
+        
+        .diagnosis-section h2, .diagnosis-section h3 {
+            color: #f9fafb !important;
+        }
+        
+        .diagnosis-section p {
+            color: #d1d5db !important;
+        }
+        
+        .diagnosis-section strong {
+            color: #f3f4f6 !important;
+        }
+        
+        /* Override light backgrounds globally */
+        .light-bg-override {
+            background: rgb(8, 10, 13) !important;
+            border: 1px solid #374151 !important;
+            color: #e5e7eb !important;
+        }
+        
+        .light-bg-override h2, .light-bg-override h3 {
+            color: #f9fafb !important;
+        }
+        
+        .light-bg-override p {
+            color: #d1d5db !important;
+        }
+        
+        .light-bg-override strong {
+            color: #f3f4f6 !important;
+        }
+        
+        /* Mobile Responsiveness */
+        @media (max-width: 768px) {
+            body {
+                margin: 16px auto;
+                padding: 0 12px;
+                max-width: 100%;
+            }
+            
+            .row {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 8px;
+            }
+            
+            table {
+                font-size: 0.85em;
+            }
+            
+            th, td {
+                padding: 8px 6px;
+            }
+            
+            .stats-card {
+                min-width: 120px;
+            }
+            
+            /* Stack form inputs vertically on mobile */
+            .form-grid {
+                grid-template-columns: 1fr !important;
+                gap: 15px !important;
+            }
+            
+            /* Smaller buttons on mobile */
+            a.button, button, input[type=submit] {
+                padding: 8px 12px;
+                font-size: 0.9em;
+            }
+            
+            /* Hide less important columns on mobile */
+            .mobile-hide {
+                display: none;
+            }
+            
+            /* Better navigation on mobile */
+            .nav-buttons {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            
+            .nav-buttons a {
+                text-align: center;
+                margin: 0 !important;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            h1 {
+                font-size: 1.5em;
+            }
+            
+            h2 {
+                font-size: 1.2em;
+            }
+            
+            .stats-card h3 {
+                font-size: 1.1em;
+            }
+            
+            .stats-card p {
+                font-size: 0.8em;
+            }
+        }
+    </style>
+</head>
+<body>
+    {{ content }}
+</body>
+</html>

@@ -1,0 +1,98 @@
+<div class="row">
+    <h1 style="margin-right:auto">Subscriptions</h1>
+    <a class="button" href="/admin/subscriptions/new">New</a>
+    <a class="button" href="/admin/removal">🚫 Auto Removal</a>
+    <a class="button" href="/admin/groups">🏘️ VIP Groups</a>
+    <div class="dropdown" style="position: relative; display: inline-block;">
+        <button class="button" onclick="toggleDropdown()" style="background: var(--color-info);">🛠️ Tools ▼</button>
+        <div id="toolsDropdown" class="dropdown-content" style="display: none; position: absolute; background: var(--bg-secondary); border: 1px solid var(--border-secondary); border-radius: 8px; padding: 10px; top: 100%; left: 0; min-width: 200px; z-index: 1000;">
+            <a href="/admin/data" style="display: block; padding: 8px; color: var(--text-secondary); text-decoration: none; border-radius: 4px;">📊 Data Viewer</a>
+            <a href="/admin/debug/database" style="display: block; padding: 8px; color: var(--text-secondary); text-decoration: none; border-radius: 4px;">🔧 Database Debug</a>
+            <a href="/admin/removal/diagnose" style="display: block; padding: 8px; color: var(--text-secondary); text-decoration: none; border-radius: 4px;">🔍 System Diagnosis</a>
+            <a href="/admin/removal/debug-specific" style="display: block; padding: 8px; color: var(--text-secondary); text-decoration: none; border-radius: 4px;">🎯 Debug Users</a>
+            <a href="/admin/removal/check-expiry" style="display: block; padding: 8px; color: var(--text-secondary); text-decoration: none; border-radius: 4px;">📅 Check Expiry</a>
+            <a href="/admin/setup-tables" style="display: block; padding: 8px; color: var(--text-secondary); text-decoration: none; border-radius: 4px;">🔧 Setup Tables</a>
+        </div>
+    </div>
+    
+    <script>
+    function toggleDropdown() {
+        const dropdown = document.getElementById('toolsDropdown');
+        dropdown.style.display = dropdown.style.display === 'none' ? 'block' : 'none';
+    }
+    
+    // Close dropdown when clicking outside
+    window.onclick = function(event) {
+        if (!event.target.matches('.dropdown button')) {
+            const dropdown = document.getElementById('toolsDropdown');
+            if (dropdown.style.display === 'block') {
+                dropdown.style.display = 'none';
+            }
+        }
+    }
+    </script>
+    <a class="button" href="/admin/logout">Logout</a>
+</div>
+
+<!-- Search Section -->
+<form method="get" action="/admin/subscriptions">
+    <div class="light-bg-override" style="padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+        <h3>🔍 Search Subscriptions</h3>
+        <div class="form-grid" style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr auto auto; gap: 10px; align-items: end;">
+            <div>
+                <label>Search by Email:</label>
+                <input type="text" name="search_email" value="{{ search_email }}" placeholder="user@example.com">
+            </div>
+            <div>
+                <label>Search by Name:</label>
+                <input type="text" name="search_name" value="{{ search_name }}" placeholder="John Doe">
+            </div>
+            <div>
+                <label>Search by Telegram ID:</label>
+                <input type="text" name="search_telegram" value="{{ search_telegram }}" placeholder="123456789">
+            </div>
+            <div>
+                <label>Filter by Status:</label>
+                <select name="search_status">
+                    <option value="">All Status</option>
+                    <option value="active" {{ "selected" if search_status == "active" else "" }}>✅ Active</option>
+                    <option value="past_due" {{ "selected" if search_status == "past_due" else "" }}>⚠️ Past Due</option>
+                    <option value="canceled" {{ "selected" if search_status == "canceled" else "" }}>❌ Canceled</option>
+                    <option value="auto_removed" {{ "selected" if search_status == "auto_removed" else "" }}>🚫 Auto Removed</option>
+                    <option value="manually_removed" {{ "selected" if search_status == "manually_removed" else "" }}>👤 Manually Removed</option>
+                    <option value="incomplete" {{ "selected" if search_status == "incomplete" else "" }}>🔄 Incomplete</option>
+                    <option value="trialing" {{ "selected" if search_status == "trialing" else "" }}>🆓 Trialing</option>
+                </select>
+            </div>
+            <div>
+                <input type="submit" value="Search" class="button">
+            </div>
+            <div>
+                <a href="/admin/subscriptions" class="button" style="background: #6b7280;">Clear</a>
+            </div>
+        </div>
+    </div>
+</form>
+
+
+
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Telegram ID</th>
+            <th>Plan</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th>Expires</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{ rows_html }}
+    </tbody>
+</table>
+
+{{ pagination_html }}

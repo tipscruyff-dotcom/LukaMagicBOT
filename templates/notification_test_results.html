@@ -1,0 +1,25 @@
+<div class="alert-success" style="border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+    <h1>✅ Notification Test Completed</h1>
+    <p><strong>📱 EXPIRY NOTIFICATIONS SENT</strong></p>
+    <p>🕐 <strong>Started:</strong> {{ start_time }}</p>
+    <p>🏁 <strong>Completed:</strong> {{ end_time }}</p>
+    <p>⏱️ <strong>Duration:</strong> {{ duration }} seconds</p>
+</div>
+
+<h2>📊 What Happened:</h2>
+<ul style="color: #e2e8f0; line-height: 1.6;">
+    <li>✅ <strong>Checked 7-day warnings</strong> (expires in 7 days)</li>
+    <li>✅ <strong>Checked 3-day warnings</strong> (expires in 3 days)</li>
+    <li>✅ <strong>Checked 1-day warnings</strong> (expires tomorrow)</li>
+    <li>✅ <strong>Checked today warnings</strong> (expires today)</li>
+    <li>📱 <strong>Sent DMs</strong> to users who haven't received warnings yet</li>
+    <li>📝 <strong>Logged all notifications</strong> to prevent duplicates</li>
+</ul>
+
+<h2>📋 Check Results:</h2>
+<p style="color: #cbd5e1;">View detailed results in the server logs and <a href="/admin/removal" style="color: #60a5fa;">dashboard</a>.</p>
+
+<div style="margin-top: 20px;" class="nav-buttons">
+    <a href="/admin/removal" class="button">📊 View Dashboard</a>
+    <a href="/admin/subscriptions" class="button">← Back to Admin</a>
+</div>

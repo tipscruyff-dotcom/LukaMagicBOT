@@ -178,33 +178,15 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
         sub_id = invoice.get("subscription")
         # Try price.id from expanded lines if available
         price_id = None
-        period_end_timestamp = None
-        line_description = None
         try:
             lines = (invoice.get("lines") or {}).get("data") or []
             if lines:
                 price = (lines[0].get("price") or {})
                 price_id = price.get("id")
-                # Extract period.end for expiration date
-                period = lines[0].get("period") or {}
-                period_end_timestamp = period.get("end")
-                # Extract description for plan type inference
-                line_description = lines[0].get("description", "").lower()
         except Exception:
             price_id = None
-            period_end_timestamp = None
-            line_description = None
 
         plan_type = map_plan_from_price_id(price_id) if price_id else None
-        
-        # If plan_type is still None, try to infer from description
-        if not plan_type and line_description:
-            if "monthly" in line_description or "month" in line_description:
-                plan_type = "monthly"
-            elif "quarterly" in line_description or "quarter" in line_description:
-                plan_type = "quarterly"
-            elif "annual" in line_description or "yearly" in line_description or "year" in line_description:
-                plan_type = "annual"
 
         Subscription = models.Subscription
         sub = None
@@ -224,11 +206,8 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
             )
-            # expires_at based on period.end from Stripe or plan_type if known
-            if period_end_timestamp:
-                from datetime import timezone
-                sub.expires_at = datetime.fromtimestamp(period_end_timestamp, timezone.utc)
-            elif plan_type == "monthly":
+            # expires_at based on plan_type if known
+            if plan_type == "monthly":
                 sub.expires_at = datetime.utcnow() + timedelta(days=30)
             elif plan_type == "quarterly":
                 sub.expires_at = datetime.utcnow() + timedelta(days=90)
@@ -248,13 +227,8 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
             # set/keep plan_type
             if plan_type and sub.plan_type != plan_type:
                 sub.plan_type = plan_type; changed = True
-            # extend expires_at - prefer period.end from Stripe, fallback to plan-based calculation
-            if period_end_timestamp:
-                from datetime import timezone
-                new_expires_at = datetime.fromtimestamp(period_end_timestamp, timezone.utc)
-                if sub.expires_at != new_expires_at:
-                    sub.expires_at = new_expires_at; changed = True
-            elif plan_type == "monthly":
+            # extend expires_at
+            if plan_type == "monthly":
                 base = sub.expires_at or datetime.utcnow()
                 sub.expires_at = max(base, datetime.utcnow()) + timedelta(days=30); changed = True
             elif plan_type == "quarterly":
@@ -352,3 +326,463 @@ def update_subscription_status(db: Session, stripe_subscription_id: str, status:
         logger.error(f"Error updating subscription status: {e}")
         db.rollback()
         return False
+
+
+# ======================
+# 🚫 Auto Removal Functions
+# ======================
+
+def get_expired_subscriptions(db: Session):
+    """Buscar assinaturas expiradas que ainda estão ativas"""
+    from datetime import datetime
+    now = datetime.utcnow()
+    return (
+        db.query(models.Subscription)
+        .filter(
+            models.Subscription.expires_at < now,
+            models.Subscription.status == "active"
+        )
+        .all()
+    )
+
+
+def get_cancelled_subscriptions(db: Session):
+    """Buscar assinaturas canceladas que ainda não foram processadas"""
+    return (
+        db.query(models.Subscription)
+        .filter(
+            models.Subscription.status.in_(["cancelled", "canceled"])
+        )
+        .all()
+    )
+
+
+def is_whitelisted(db: Session, email: str = None, telegram_user_id: str = None) -> bool:
+    """Verificar se usuário está na whitelist (por email ou telegram_user_id)"""
+    try:
+        if telegram_user_id:
+            # Primary method: check by telegram_user_id
+            return db.query(models.Whitelist).filter_by(telegram_user_id=telegram_user_id).first() is not None
+        elif email:
+            # Fallback: check by email (for backward compatibility)
+            return db.query(models.Whitelist).filter_by(email=email.lower().strip()).first() is not None
+        else:
+            return False
+    except Exception as e:
+        # Table doesn't exist yet - assume not whitelisted
+        logger.warning(f"Whitelist table doesn't exist yet: {e}")
+        return False
+
+
+def add_to_whitelist(db: Session, telegram_user_id: str, reason: str, added_by: str = "admin", email: str = None) -> bool:
+    """Adicionar usuário à whitelist por Telegram ID"""
+    try:
+        telegram_user_id = telegram_user_id.strip()
+        
+        # Verificar se já existe
+        existing = db.query(models.Whitelist).filter_by(telegram_user_id=telegram_user_id).first()
+        if existing:
+            logger.warning(f"Telegram ID {telegram_user_id} already in whitelist")
+            return False
+        
+        whitelist_entry = models.Whitelist(
+            telegram_user_id=telegram_user_id,
+            email=email.lower().strip() if email else None,
+            reason=reason,
+            added_by=added_by
+        )
+        db.add(whitelist_entry)
+        db.commit()
+        logger.info(f"Added Telegram ID {telegram_user_id} to whitelist: {reason}")
+        return True
+    except Exception as e:
+        logger.error(f"Error adding to whitelist: {e}")
+        db.rollback()
+        return False
+
+
+def remove_from_whitelist(db: Session, telegram_user_id: str) -> bool:
+    """Remover usuário da whitelist por Telegram ID"""
+    try:
+        telegram_user_id = telegram_user_id.strip()
+        whitelist_entry = db.query(models.Whitelist).filter_by(telegram_user_id=telegram_user_id).first()
+        if whitelist_entry:
+            db.delete(whitelist_entry)
+            db.commit()
+            logger.info(f"Removed Telegram ID {telegram_user_id} from whitelist")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error removing from whitelist: {e}")
+        db.rollback()
+        return False
+
+
+def log_removal_attempt(
+    db: Session,
+    email: str,
+    telegram_user_id: str = None,
+    reason: str = "expired",
+    status: str = "pending",
+    groups_removed_from: list = None,
+    error_message: str = None,
+    dm_sent: bool = False
+) -> models.RemovalLog:
+    """Registrar tentativa de remoção"""
+    try:
+        groups_str = ",".join(map(str, groups_removed_from)) if groups_removed_from else None
+        
+        removal_log = models.RemovalLog(
+            email=email.lower().strip(),
+            telegram_user_id=telegram_user_id,
+            reason=reason,
+            status=status,
+            groups_removed_from=groups_str,
+            error_message=error_message,
+            dm_sent=dm_sent
+        )
+        db.add(removal_log)
+        db.commit()
+        logger.info(f"Logged removal attempt for {email}: {status}")
+        return removal_log
+    except Exception as e:
+        # Table doesn't exist yet - log to console instead
+        logger.warning(f"RemovalLog table doesn't exist yet, logging to console: {email} - {status}")
+        logger.error(f"Error logging removal attempt: {e}")
+        return None
+
+
+def update_removal_log(
+    db: Session,
+    log_id: int,
+    status: str = None,
+    groups_removed_from: list = None,
+    error_message: str = None,
+    dm_sent: bool = None
+) -> bool:
+    """Atualizar log de remoção"""
+    try:
+        removal_log = db.query(models.RemovalLog).filter_by(id=log_id).first()
+        if not removal_log:
+            return False
+        
+        if status:
+            removal_log.status = status
+        if groups_removed_from is not None:
+            removal_log.groups_removed_from = ",".join(map(str, groups_removed_from))
+        if error_message:
+            removal_log.error_message = error_message
+        if dm_sent is not None:
+            removal_log.dm_sent = dm_sent
+            
+        db.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Error updating removal log: {e}")
+        db.rollback()
+        return False
+
+
+def get_recent_removal_logs(db: Session, limit: int = 100):
+    """Buscar logs recentes de remoção"""
+    try:
+        return (
+            db.query(models.RemovalLog)
+            .order_by(models.RemovalLog.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+    except Exception as e:
+        # Table doesn't exist yet - return empty list
+        logger.warning(f"RemovalLog table doesn't exist yet: {e}")
+        return []
+
+
+def mark_subscription_processed(db: Session, subscription_id: int, new_status: str = "processed") -> bool:
+    """Marcar assinatura como processada"""
+    try:
+        subscription = db.query(models.Subscription).filter_by(id=subscription_id).first()
+        if subscription:
+            subscription.status = new_status
+            subscription.updated_at = datetime.utcnow()
+            db.commit()
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error marking subscription as processed: {e}")
+        db.rollback()
+        return False
+
+
+# ======================
+# 📱 Notification System Functions
+# ======================
+
+def get_subscriptions_expiring_in_days(db: Session, days: int):
+    """Buscar assinaturas que expiram em X dias"""
+    from datetime import datetime, timedelta
+    
+    # Calculate target date range
+    now = datetime.utcnow()
+    target_date_start = now + timedelta(days=days)
+    target_date_end = target_date_start + timedelta(hours=23, minutes=59, seconds=59)
+    
+    return (
+        db.query(models.Subscription)
+        .filter(
+            models.Subscription.status == "active",
+            models.Subscription.expires_at >= target_date_start,
+            models.Subscription.expires_at <= target_date_end,
+            models.Subscription.telegram_user_id.isnot(None)
+        )
+        .all()
+    )
+
+
+def get_subscriptions_in_grace_period(db: Session, grace_period_days: int = 3):
+    """Buscar assinaturas expiradas mas ainda no grace period"""
+    from datetime import datetime, timedelta
+    
+    now = datetime.utcnow()
+    grace_cutoff = now - timedelta(days=grace_period_days)
+    
+    return (
+        db.query(models.Subscription)
+        .filter(
+            models.Subscription.status == "active",
+            models.Subscription.expires_at < now,  # Expirada
+            models.Subscription.expires_at >= grace_cutoff,  # Mas ainda no grace period
+            models.Subscription.telegram_user_id.isnot(None)
+        )
+        .all()
+    )
+
+
+def get_subscriptions_past_grace_period(db: Session, grace_period_days: int = 3):
+    """Buscar assinaturas que passaram do grace period (devem ser removidas)"""
+    from datetime import datetime, timedelta
+    
+    now = datetime.utcnow()
+    grace_cutoff = now - timedelta(days=grace_period_days)
+    
+    return (
+        db.query(models.Subscription)
+        .filter(
+            models.Subscription.status == "active",
+            models.Subscription.expires_at < grace_cutoff,  # Expirada há mais de X dias
+            models.Subscription.telegram_user_id.isnot(None)
+        )
+        .all()
+    )
+
+
+def has_notification_been_sent(db: Session, subscription_id: int, notification_type: str) -> bool:
+    """Verificar se notificação já foi enviada para esta assinatura"""
+    try:
+        return (
+            db.query(models.NotificationLog)
+            .filter_by(
+                subscription_id=subscription_id,
+                notification_type=notification_type
+            )
+            .first() is not None
+        )
+    except Exception as e:
+        # Table doesn't exist yet - assume not sent
+        logger.warning(f"NotificationLog table doesn't exist yet: {e}")
+        return False
+
+
+def log_notification(
+    db: Session,
+    email: str,
+    telegram_user_id: str,
+    notification_type: str,
+    subscription_id: int,
+    expires_at: datetime,
+    message_sent: bool = True,
+    error_message: str = None
+) -> bool:
+    """Registrar notificação enviada"""
+    try:
+        notification_log = models.NotificationLog(
+            email=email.lower().strip(),
+            telegram_user_id=telegram_user_id,
+            notification_type=notification_type,
+            subscription_id=subscription_id,
+            expires_at=expires_at,
+            message_sent=message_sent,
+            error_message=error_message
+        )
+        db.add(notification_log)
+        db.commit()
+        logger.info(f"Logged notification for {email}: {notification_type}")
+        return True
+    except Exception as e:
+        # Table doesn't exist yet - log to console
+        logger.warning(f"NotificationLog table doesn't exist, logging to console: {email} - {notification_type}")
+        logger.error(f"Error logging notification: {e}")
+        return False
+
+
+def get_recent_notifications(db: Session, limit: int = 100):
+    """Buscar notificações recentes"""
+    try:
+        return (
+            db.query(models.NotificationLog)
+            .order_by(models.NotificationLog.sent_at.desc())
+            .limit(limit)
+            .all()
+        )
+    except Exception as e:
+        # Table doesn't exist yet - return empty list
+        logger.warning(f"NotificationLog table doesn't exist yet: {e}")
+        return []
+
+
+# ======================
+# 🧹 Database Cleanup Functions
+# ======================
+
+def cleanup_old_stripe_events(db: Session, days_old: int = 30) -> int:
+    """Limpar eventos Stripe antigos"""
+    from datetime import datetime, timedelta
+    
+    try:
+        cutoff_date = datetime.utcnow() - timedelta(days=days_old)
+        
+        old_events = (
+            db.query(models.StripeEvent)
+            .filter(models.StripeEvent.received_at < cutoff_date)
+            .all()
+        )
+        
+        count = len(old_events)
+        if count > 0:
+            for event in old_events:
+                db.delete(event)
+            db.commit()
+            logger.info(f"🧹 Cleaned {count} old Stripe events (older than {days_old} days)")
+        
+        return count
+        
+    except Exception as e:
+        logger.error(f"Error cleaning old Stripe events: {e}")
+        db.rollback()
+        return 0
+
+
+def cleanup_old_invite_logs(db: Session, days_old: int = 7) -> int:
+    """Limpar logs de convites antigos"""
+    from datetime import datetime, timedelta
+    
+    try:
+        cutoff_date = datetime.utcnow() - timedelta(days=days_old)
+        
+        old_invites = (
+            db.query(models.InviteLog)
+            .filter(models.InviteLog.created_at < cutoff_date)
+            .all()
+        )
+        
+        count = len(old_invites)
+        if count > 0:
+            for invite in old_invites:
+                db.delete(invite)
+            db.commit()
+            logger.info(f"🧹 Cleaned {count} old invite logs (older than {days_old} days)")
+        
+        return count
+        
+    except Exception as e:
+        logger.error(f"Error cleaning old invite logs: {e}")
+        db.rollback()
+        return 0
+
+
+def cleanup_old_removal_logs(db: Session, days_old: int = 30) -> int:
+    """Limpar logs de remoção antigos"""
+    from datetime import datetime, timedelta
+    
+    try:
+        cutoff_date = datetime.utcnow() - timedelta(days=days_old)
+        
+        old_removals = (
+            db.query(models.RemovalLog)
+            .filter(models.RemovalLog.created_at < cutoff_date)
+            .all()
+        )
+        
+        count = len(old_removals)
+        if count > 0:
+            for removal in old_removals:
+                db.delete(removal)
+            db.commit()
+            logger.info(f"🧹 Cleaned {count} old removal logs (older than {days_old} days)")
+        
+        return count
+        
+    except Exception as e:
+        logger.error(f"Error cleaning old removal logs: {e}")
+        db.rollback()
+        return 0
+
+
+def cleanup_old_notification_logs(db: Session, days_old: int = 30) -> int:
+    """Limpar logs de notificação antigos"""
+    from datetime import datetime, timedelta
+    
+    try:
+        cutoff_date = datetime.utcnow() - timedelta(days=days_old)
+        
+        old_notifications = (
+            db.query(models.NotificationLog)
+            .filter(models.NotificationLog.sent_at < cutoff_date)
+            .all()
+        )
+        
+        count = len(old_notifications)
+        if count > 0:
+            for notification in old_notifications:
+                db.delete(notification)
+            db.commit()
+            logger.info(f"🧹 Cleaned {count} old notification logs (older than {days_old} days)")
+        
+        return count
+        
+    except Exception as e:
+        logger.error(f"Error cleaning old notification logs: {e}")
+        db.rollback()
+        return 0
+
+
+def get_database_stats(db: Session) -> dict:
+    """Obter estatísticas do banco de dados"""
+    try:
+        stats = {
+            'subscriptions': db.query(models.Subscription).count(),
+            'stripe_events': db.query(models.StripeEvent).count(),
+            'invite_logs': db.query(models.InviteLog).count(),
+        }
+        
+        # Try new tables
+        try:
+            stats['removal_logs'] = db.query(models.RemovalLog).count()
+        except:
+            stats['removal_logs'] = 'N/A'
+            
+        try:
+            stats['whitelist'] = db.query(models.Whitelist).count()
+        except:
+            stats['whitelist'] = 'N/A'
+            
+        try:
+            stats['notification_logs'] = db.query(models.NotificationLog).count()
+        except:
+            stats['notification_logs'] = 'N/A'
+        
+        return stats
+        
+    except Exception as e:
+        logger.error(f"Error getting database stats: {e}")
+        return {}
