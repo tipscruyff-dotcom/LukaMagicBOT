@@ -507,6 +507,12 @@ DEFAULT_SETTINGS = {
     "service_cleanup.remove_on_join": "true",
     "service_cleanup.remove_on_leave": "true",
     "service_cleanup.forward_target_id": "",
+    # retroactive cleanup defaults (disabled by default)
+    "service_cleanup.history_enabled": "false",
+    "service_cleanup.history_scope": "all",  # all | specific
+    "service_cleanup.history_group_id": "",
+    "service_cleanup.history_since": "",  # ISO8601
+    "service_cleanup.history_batch_size": "500",
 }
 
 
@@ -578,6 +584,163 @@ def get_service_cleanup_config(db: Session) -> dict:
         "remove_on_leave": remove_on_leave,
         "forward_target_id": forward_target_id,
     }
+
+
+# ---- Retroactive cleanup helpers ----
+def get_service_cleanup_history_config(db: Session) -> dict:
+    def to_bool(v: Optional[str], default: bool) -> bool:
+        if v is None:
+            return default
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    hist_enabled = to_bool(get_setting(db, "service_cleanup.history_enabled"), False)
+    scope = (get_setting(db, "service_cleanup.history_scope", "all") or "all").strip().lower()
+    gid_raw = get_setting(db, "service_cleanup.history_group_id", "") or ""
+    since = (get_setting(db, "service_cleanup.history_since", "") or "").strip()
+    bsize_raw = get_setting(db, "service_cleanup.history_batch_size", "500") or "500"
+    try:
+        gid = int(gid_raw.strip()) if str(gid_raw).strip() else None
+    except Exception:
+        gid = None
+    try:
+        bsize = max(1, min(5000, int(str(bsize_raw).strip() or "500")))
+    except Exception:
+        bsize = 500
+    return {
+        "history_enabled": hist_enabled,
+        "history_scope": scope if scope in ("all", "specific") else "all",
+        "history_group_id": gid,
+        "history_since": since,
+        "history_batch_size": bsize,
+    }
+
+
+def set_service_cleanup_history_config(
+    db: Session,
+    *,
+    history_enabled: bool,
+    history_scope: str,
+    history_group_id: Optional[int],
+    history_since: str,
+    history_batch_size: int,
+) -> bool:
+    ok = True
+    ok &= set_setting(db, "service_cleanup.history_enabled", "true" if history_enabled else "false")
+    ok &= set_setting(db, "service_cleanup.history_scope", history_scope or "all")
+    ok &= set_setting(db, "service_cleanup.history_group_id", str(history_group_id or ""))
+    ok &= set_setting(db, "service_cleanup.history_since", history_since or "")
+    ok &= set_setting(db, "service_cleanup.history_batch_size", str(history_batch_size))
+    return ok
+
+
+def record_service_message_seen(db: Session, *, chat_id: int, message_id: int, event_type: str) -> None:
+    from models import ServiceMessageSeen
+    try:
+        # unique by chat_id + message_id
+        exists = (
+            db.query(ServiceMessageSeen)
+            .filter(ServiceMessageSeen.chat_id == chat_id, ServiceMessageSeen.message_id == message_id)
+            .first()
+        )
+        if exists:
+            return
+        row = ServiceMessageSeen(chat_id=chat_id, message_id=message_id, event_type=event_type)
+        db.add(row)
+        db.commit()
+    except Exception as e:
+        logger.debug(f"record_service_message_seen failed: {e}")
+
+
+def retro_delete_service_messages(
+    db: Session,
+    *,
+    application,  # telegram Application to access bot
+    scope: str = "all",
+    group_id: Optional[int] = None,
+    since_iso: str = "",
+    batch_size: int = 500,
+) -> dict:
+    """Attempt to delete previously seen service messages according to the filters.
+    Returns a summary dict.
+    """
+    from models import ServiceMessageSeen
+    from telegram.constants import ChatMemberStatus
+    from datetime import datetime
+
+    summary = {
+        "matched": 0,
+        "attempted": 0,
+        "deleted_ok": 0,
+        "errors": {},
+    }
+
+    try:
+        q = db.query(ServiceMessageSeen).filter(ServiceMessageSeen.deleted == False)  # noqa: E712
+        if scope == "specific" and group_id:
+            q = q.filter(ServiceMessageSeen.chat_id == group_id)
+        if since_iso:
+            try:
+                since_dt = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+                q = q.filter(ServiceMessageSeen.seen_at >= since_dt)
+            except Exception:
+                pass
+        rows = q.order_by(ServiceMessageSeen.seen_at.asc()).limit(batch_size).all()
+        summary["matched"] = len(rows)
+        bot = application.bot
+        for r in rows:
+            summary["attempted"] += 1
+            err_reason = None
+            try:
+                cm = bot.get_chat_member  # sync wrapper not allowed; use async via application
+            except Exception:
+                pass
+            # We must use async APIs; this helper is intended to be called from a FastAPI route using loop.run_until_complete
+            try:
+                # Permission check
+                bot_member = application.create_task(bot.get_chat_member(r.chat_id, bot.id))  # type: ignore
+            except Exception:
+                bot_member = None
+            try:
+                if bot_member:
+                    bm = application.loop.run_until_complete(bot_member)  # type: ignore
+                    status = getattr(bm, "status", None)
+                    if status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+                        err_reason = "not_admin"
+                        raise RuntimeError("not_admin")
+                    if hasattr(bm, "can_delete_messages") and not getattr(bm, "can_delete_messages", False):
+                        err_reason = "no_delete_perm"
+                        raise RuntimeError("no_delete_perm")
+                # Delete
+                fut = bot.delete_message(chat_id=r.chat_id, message_id=r.message_id)
+                application.loop.run_until_complete(fut)  # type: ignore
+                r.deleted = True
+                r.delete_ok = True
+                r.last_error = None
+                db.commit()
+                summary["deleted_ok"] += 1
+                continue
+            except Exception as de:
+                # Determine reason
+                msg = str(de).lower()
+                if not err_reason:
+                    if "message to delete not found" in msg or "message can't be deleted" in msg or "message to delete not found" in msg:
+                        err_reason = "not_found"
+                    elif "too many requests" in msg or "flood" in msg:
+                        err_reason = "flood_wait"
+                    else:
+                        err_reason = "other"
+                r.deleted = True
+                r.delete_ok = False
+                r.last_error = err_reason
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                summary["errors"][err_reason] = summary["errors"].get(err_reason, 0) + 1
+        return summary
+    except Exception as e:
+        logger.error(f"retro_delete_service_messages failed: {e}")
+        return summary
 
 
 def set_service_cleanup_config(

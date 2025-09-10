@@ -703,8 +703,9 @@ async def admin_service_cleanup_settings(request: Request):
     _require_admin(request)
     try:
         with SessionLocal() as db:
-            from crud import get_service_cleanup_config
+            from crud import get_service_cleanup_config, get_service_cleanup_history_config
             cfg = get_service_cleanup_config(db)
+            hcfg = get_service_cleanup_history_config(db)
         form_html = f"""
         <h1>🧹 Service Messages Cleanup</h1>
         <div class=\"nav-buttons\" style=\"margin:10px 0;\"> 
@@ -737,6 +738,36 @@ async def admin_service_cleanup_settings(request: Request):
             </div>
             <div style=\"margin-top:12px;\">
                 <input type=\"submit\" value=\"Save Settings\" />
+            </div>
+            <hr style=\"margin:18px 0;border-color:#1f2937\"/>
+            <h2>🗂️ Limpeza retroativa (apenas mensagens que o bot já viu)</h2>
+            <div class=\"muted\" style=\"margin:6px 0 12px\">Use para remover mensagens de serviço antigas registradas desde que o bot está no grupo.</div>
+            <div style=\"display:grid;grid-template-columns:1fr 1fr;gap:12px;\">
+                <label>Habilitar retroativa
+                    <select name=\"history_enabled\">
+                        <option value=\"0\" {'' if not hcfg.get('history_enabled') else 'selected'}>Desligado</option>
+                        <option value=\"1\" {'selected' if hcfg.get('history_enabled') else ''}>Ligado</option>
+                    </select>
+                </label>
+                <label>Escopo
+                    <select name=\"history_scope\">
+                        <option value=\"all\" {'selected' if hcfg.get('history_scope') == 'all' else ''}>Todos os grupos</option>
+                        <option value=\"specific\" {'selected' if hcfg.get('history_scope') == 'specific' else ''}>Apenas 1 grupo</option>
+                    </select>
+                </label>
+                <label>Group ID específico (opcional)
+                    <input name=\"history_group_id\" value=\"{hcfg.get('history_group_id') or ''}\" placeholder=\"-100...\" />
+                </label>
+                <label>Desde (ISO8601, opcional)
+                    <input name=\"history_since\" value=\"{hcfg.get('history_since') or ''}\" placeholder=\"2025-09-10T00:00:00Z\" />
+                </label>
+                <label>Batch size
+                    <input name=\"history_batch_size\" value=\"{hcfg.get('history_batch_size') or 500}\" />
+                </label>
+            </div>
+            <div style=\"margin-top:10px;display:flex;gap:10px;\">
+                <button formaction=\"/admin/settings/service-cleanup/history/save\" formmethod=\"post\">Salvar opções retroativas</button>
+                <button class=\"danger\" formaction=\"/admin/settings/service-cleanup/history/run\" formmethod=\"post\">Executar agora</button>
             </div>
             <p class=\"muted\" style=\"margin-top:10px;\">Only join/leave service messages are affected. No other messages are touched.</p>
         </form>
@@ -772,6 +803,75 @@ async def admin_service_cleanup_settings_save(
     except Exception as e:
         logger.error("Failed to save cleanup settings: %s", e)
         return HTMLResponse(_html_page("Error", f"<p>Error saving: {str(e)}</p>"))
+
+
+@app.post("/admin/settings/service-cleanup/history/save")
+async def admin_service_cleanup_history_save(
+    request: Request,
+    history_enabled: str = Form("0"),
+    history_scope: str = Form("all"),
+    history_group_id: str = Form(""),
+    history_since: str = Form(""),
+    history_batch_size: str = Form("500"),
+):
+    _require_admin(request)
+    try:
+        he = history_enabled == "1"
+        scope = history_scope if history_scope in ("all", "specific") else "all"
+        try:
+            gid = int(history_group_id.strip()) if history_group_id and history_group_id.strip() else None
+        except Exception:
+            gid = None
+        try:
+            bsize = max(1, min(5000, int(history_batch_size or "500")))
+        except Exception:
+            bsize = 500
+        with SessionLocal() as db:
+            from crud import set_service_cleanup_history_config
+            set_service_cleanup_history_config(db, history_enabled=he, history_scope=scope, history_group_id=gid, history_since=history_since or "", history_batch_size=bsize)
+        return RedirectResponse(url="/admin/settings/service-cleanup", status_code=303)
+    except Exception as e:
+        logger.error("Failed to save history options: %s", e)
+        return HTMLResponse(_html_page("Error", f"<p>Error saving history: {str(e)}</p>"))
+
+
+@app.post("/admin/settings/service-cleanup/history/run")
+async def admin_service_cleanup_history_run(request: Request):
+    _require_admin(request)
+    try:
+        if not DATABASE_AVAILABLE:
+            return HTMLResponse(_html_page("Service Cleanup", "<div class='alert-error'>Database not available.</div>"))
+        if application is None:
+            return HTMLResponse(_html_page("Service Cleanup", "<div class='alert-error'>Bot application not ready.</div>"))
+        with SessionLocal() as db:
+            from crud import get_service_cleanup_history_config, retro_delete_service_messages
+            hcfg = get_service_cleanup_history_config(db)
+            if not hcfg.get("history_enabled"):
+                return HTMLResponse(_html_page("Service Cleanup", "<div class='alert-warning'>Retroactive cleanup is disabled.</div>"))
+            summary = retro_delete_service_messages(
+                db,
+                application=application,
+                scope=hcfg.get("history_scope", "all"),
+                group_id=hcfg.get("history_group_id"),
+                since_iso=hcfg.get("history_since") or "",
+                batch_size=hcfg.get("history_batch_size", 500),
+            )
+        body = f"""
+        <h1>🧹 Retro Cleanup - Resultado</h1>
+        <div class='light-bg-override' style='padding:12px;border-radius:8px;'>
+            <p><strong>Matched</strong>: {summary.get('matched')}</p>
+            <p><strong>Attempted</strong>: {summary.get('attempted')}</p>
+            <p><strong>Deleted OK</strong>: {summary.get('deleted_ok')}</p>
+            <p><strong>Errors</strong>: {summary.get('errors')}</p>
+            <div style='margin-top:10px;'>
+                <a href='/admin/settings/service-cleanup' class='button'>Voltar</a>
+            </div>
+        </div>
+        """
+        return HTMLResponse(_html_page("Retro Cleanup", body))
+    except Exception as e:
+        logger.error("Failed to run retro cleanup: %s", e)
+        return HTMLResponse(_html_page("Error", f"<p>Error running: {str(e)}</p>"))
 
 
 @app.get("/admin/login", response_class=HTMLResponse)

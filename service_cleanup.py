@@ -8,7 +8,7 @@ from telegram.constants import ChatMemberStatus
 from telegram.ext import ContextTypes
 
 from db import SessionLocal
-from crud import get_service_cleanup_config
+from crud import get_service_cleanup_config, record_service_message_seen
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +194,16 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         event_type = "join" if is_join else "leave"
+
+        # Record seen service message for potential retro cleanup
+        try:
+            msg = update.effective_message
+            chat = update.effective_chat
+            if msg and chat:
+                with SessionLocal() as db:
+                    record_service_message_seen(db, chat_id=chat.id, message_id=msg.message_id, event_type=event_type)
+        except Exception:
+            pass
 
         # Schedule deletion ASAP to minimize message visibility
         should_delete = (is_join and cfg.get("remove_on_join", True)) or (

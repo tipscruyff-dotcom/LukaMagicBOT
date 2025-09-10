@@ -93,3 +93,19 @@ class Setting(Base):
     value: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     updated_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
+
+class ServiceMessageSeen(Base):
+    """Tracks service messages (join/leave) seen by the bot for optional retroactive cleanup."""
+    __tablename__ = "service_messages_seen"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    message_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(10), nullable=False)  # 'join' | 'leave'
+    seen_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    delete_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+Index("ix_service_seen_chat_msg", ServiceMessageSeen.chat_id, ServiceMessageSeen.message_id, unique=True)
+Index("ix_service_seen_seen_at", ServiceMessageSeen.seen_at)
+
