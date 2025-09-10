@@ -138,20 +138,20 @@ async def _try_delete_message(context: ContextTypes.DEFAULT_TYPE, update: Update
     # Optional: minimal permission check via chat member status
     try:
         bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
-    status = getattr(bot_member, "status", None)
-    # In PTB v21, status is ChatMemberStatus enum (ADMINISTRATOR/OWNER/MEMBER/...)
-    if status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+        status = getattr(bot_member, "status", None)
+        # In PTB v21, status is ChatMemberStatus enum (ADMINISTRATOR/OWNER/MEMBER/...)
+        if status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
             logger.warning(
-        "service_cleanup event=%s action=skip_no_perm chat_id=%s ok=false reason=not_admin status=%s",
+                "service_cleanup event=%s action=skip_no_perm chat_id=%s ok=false reason=not_admin status=%s",
                 event_type,
                 chat.id,
-        status,
+                status,
             )
             return False
         # If available, check can_delete_messages
-    if hasattr(bot_member, "can_delete_messages") and not getattr(bot_member, "can_delete_messages", False):
+        if hasattr(bot_member, "can_delete_messages") and not getattr(bot_member, "can_delete_messages", False):
             logger.warning(
-        "service_cleanup event=%s action=skip_no_perm chat_id=%s ok=false reason=no_delete_perm",
+                "service_cleanup event=%s action=skip_no_perm chat_id=%s ok=false reason=no_delete_perm",
                 event_type,
                 chat.id,
             )
