@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -137,19 +138,20 @@ async def _try_delete_message(context: ContextTypes.DEFAULT_TYPE, update: Update
     # Optional: minimal permission check via chat member status
     try:
         bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
-        if getattr(bot_member, "status", None) not in ("administrator", "creator"):
+    status = getattr(bot_member, "status", None)
+    # In PTB v21, status is ChatMemberStatus enum (ADMINISTRATOR/OWNER/MEMBER/...)
+    if status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
             logger.warning(
-                "service_cleanup event=%s action=skip_no_perm chat_id=%s ok=false reason=not_admin",
+        "service_cleanup event=%s action=skip_no_perm chat_id=%s ok=false reason=not_admin status=%s",
                 event_type,
                 chat.id,
+        status,
             )
             return False
         # If available, check can_delete_messages
-        if hasattr(bot_member, "can_delete_messages") and not getattr(
-            bot_member, "can_delete_messages", False
-        ):
+    if hasattr(bot_member, "can_delete_messages") and not getattr(bot_member, "can_delete_messages", False):
             logger.warning(
-                "service_cleanup event=%s action=skip_no_perm chat_id=%s ok=false reason=no_delete_perm",
+        "service_cleanup event=%s action=skip_no_perm chat_id=%s ok=false reason=no_delete_perm",
                 event_type,
                 chat.id,
             )
@@ -193,18 +195,23 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         event_type = "join" if is_join else "leave"
 
-        # Forward or send summary first
+        # Schedule deletion ASAP to minimize message visibility
+        should_delete = (is_join and cfg.get("remove_on_join", True)) or (
+            is_leave and cfg.get("remove_on_leave", True)
+        )
+        if should_delete and update.effective_message is not None:
+            try:
+                asyncio.create_task(_try_delete_message(context, update, event_type))
+            except Exception:
+                # Fallback: if scheduling fails, do it synchronously
+                await _try_delete_message(context, update, event_type)
+
+        # Forward/copy or send summary (may fail if message already deleted; we'll fallback)
         await _send_forward_or_summary(
             context,
             forward_target_id=cfg.get("forward_target_id"),
             update=update,
             event_type=event_type,
         )
-
-        # Delete if allowed by flags
-        if is_join and cfg.get("remove_on_join", True):
-            await _try_delete_message(context, update, event_type)
-        elif is_leave and cfg.get("remove_on_leave", True):
-            await _try_delete_message(context, update, event_type)
     except Exception as e:
         logger.warning("service_cleanup action=error error=%s", e)

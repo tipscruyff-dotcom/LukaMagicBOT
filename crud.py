@@ -511,13 +511,29 @@ DEFAULT_SETTINGS = {
 
 
 def get_setting(db: Session, key: str, default: Optional[str] = None) -> Optional[str]:
+    """Fetch setting from DB; if missing, fall back to environment and then defaults.
+
+    This allows initial configuration via .env without having to pre-populate the DB.
+    """
     try:
         row = db.query(models.Setting).filter_by(key=key).first()
-        if row is None:
-            return DEFAULT_SETTINGS.get(key, default)
-        return row.value
+        if row is not None:
+            return row.value
+        # Not in DB: check environment override (supports keys with dots via python-dotenv)
+        import os
+        env_val = os.getenv(key)
+        if env_val is not None:
+            return env_val
+        return DEFAULT_SETTINGS.get(key, default)
     except Exception:
-        # Table may not exist yet
+        # Table may not exist yet — still try environment before defaults
+        try:
+            import os
+            env_val = os.getenv(key)
+            if env_val is not None:
+                return env_val
+        except Exception:
+            pass
         return DEFAULT_SETTINGS.get(key, default)
 
 
