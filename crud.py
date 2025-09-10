@@ -498,6 +498,89 @@ def get_recent_removal_logs(db: Session, limit: int = 100):
         return []
 
 
+# ======================
+# Settings helpers
+# ======================
+
+DEFAULT_SETTINGS = {
+    "service_cleanup.enabled": "false",
+    "service_cleanup.remove_on_join": "true",
+    "service_cleanup.remove_on_leave": "true",
+    "service_cleanup.forward_target_id": "",
+}
+
+
+def get_setting(db: Session, key: str, default: Optional[str] = None) -> Optional[str]:
+    try:
+        row = db.query(models.Setting).filter_by(key=key).first()
+        if row is None:
+            return DEFAULT_SETTINGS.get(key, default)
+        return row.value
+    except Exception:
+        # Table may not exist yet
+        return DEFAULT_SETTINGS.get(key, default)
+
+
+def set_setting(db: Session, key: str, value: Optional[str]) -> bool:
+    try:
+        row = db.query(models.Setting).filter_by(key=key).first()
+        if row is None:
+            row = models.Setting(key=key, value=value)
+            db.add(row)
+        else:
+            row.value = value
+        db.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to set setting {key}: {e}")
+        db.rollback()
+        return False
+
+
+def get_service_cleanup_config(db: Session) -> dict:
+    """Return normalized service cleanup config with proper types and defaults."""
+    def to_bool(v: Optional[str], default: bool) -> bool:
+        if v is None:
+            return default
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    enabled = to_bool(get_setting(db, "service_cleanup.enabled"), False)
+    remove_on_join = to_bool(get_setting(db, "service_cleanup.remove_on_join"), True)
+    remove_on_leave = to_bool(get_setting(db, "service_cleanup.remove_on_leave"), True)
+    forward_target_id_raw = get_setting(db, "service_cleanup.forward_target_id", "") or ""
+
+    # sanitize numeric id if possible
+    forward_target_id = None
+    try:
+        forward_target_id = int(str(forward_target_id_raw).strip()) if str(forward_target_id_raw).strip() else None
+    except Exception:
+        forward_target_id = None
+
+    return {
+        "enabled": enabled,
+        "remove_on_join": remove_on_join,
+        "remove_on_leave": remove_on_leave,
+        "forward_target_id": forward_target_id,
+    }
+
+
+def set_service_cleanup_config(
+    db: Session,
+    *,
+    enabled: bool,
+    remove_on_join: bool,
+    remove_on_leave: bool,
+    forward_target_id: Optional[int],
+) -> bool:
+    ok = True
+    ok &= set_setting(db, "service_cleanup.enabled", "true" if enabled else "false")
+    ok &= set_setting(db, "service_cleanup.remove_on_join", "true" if remove_on_join else "false")
+    ok &= set_setting(db, "service_cleanup.remove_on_leave", "true" if remove_on_leave else "false")
+    ok &= set_setting(db, "service_cleanup.forward_target_id", str(forward_target_id or ""))
+    return ok
+
+
+
 def mark_subscription_processed(db: Session, subscription_id: int, new_status: str = "processed") -> bool:
     """Marcar assinatura como processada"""
     try:

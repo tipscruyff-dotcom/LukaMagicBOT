@@ -84,3 +84,12 @@ class NotificationLog(Base):
 
 Index("ix_notification_logs_email_type", NotificationLog.email, NotificationLog.notification_type)
 Index("ix_notification_logs_subscription", NotificationLog.subscription_id, NotificationLog.notification_type)
+
+
+class Setting(Base):
+    """Generic key/value settings storage"""
+    __tablename__ = "settings"
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    updated_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+

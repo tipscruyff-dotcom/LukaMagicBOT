@@ -25,6 +25,9 @@ from telegram.ext import (
     filters,
 )
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ChatMemberHandler
+
+from service_cleanup import handle_update as service_cleanup_handle_update
 
 # Load environment variables from .env (for local runs)
 from dotenv import load_dotenv
@@ -695,6 +698,82 @@ def _require_admin(request: Request):
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
+@app.get("/admin/settings/service-cleanup", response_class=HTMLResponse)
+async def admin_service_cleanup_settings(request: Request):
+    _require_admin(request)
+    try:
+        with SessionLocal() as db:
+            from crud import get_service_cleanup_config
+            cfg = get_service_cleanup_config(db)
+        form_html = f"""
+        <h1>🧹 Service Messages Cleanup</h1>
+        <div class=\"nav-buttons\" style=\"margin:10px 0;\"> 
+            <a href=\"/admin/subscriptions\" class=\"button\">← Admin</a>
+            <a href=\"/admin/removal\" class=\"button\">🚫 Auto Removal</a>
+        </div>
+        <form method=\"post\" action=\"/admin/settings/service-cleanup\" class=\"light-bg-override\" style=\"padding:15px;border-radius:8px;\">
+            <div style=\"display:grid;grid-template-columns:1fr 1fr;gap:12px;\">
+                <label>Enable cleanup
+                    <select name=\"enabled\"> 
+                        <option value=\"0\" {'' if cfg.get('enabled') else 'selected'}>Disabled</option>
+                        <option value=\"1\" {'selected' if cfg.get('enabled') else ''}>Enabled</option>
+                    </select>
+                </label>
+                <label>Forward target ID (optional)
+                    <input name=\"forward_target_id\" value=\"{cfg.get('forward_target_id') or ''}\" placeholder=\"e.g., -1001234567890\" />
+                </label>
+                <label>Remove join messages
+                    <select name=\"remove_on_join\"> 
+                        <option value=\"1\" {'selected' if cfg.get('remove_on_join') else ''}>Yes</option>
+                        <option value=\"0\" {'' if cfg.get('remove_on_join') else 'selected'}>No</option>
+                    </select>
+                </label>
+                <label>Remove leave/kick messages
+                    <select name=\"remove_on_leave\"> 
+                        <option value=\"1\" {'selected' if cfg.get('remove_on_leave') else ''}>Yes</option>
+                        <option value=\"0\" {'' if cfg.get('remove_on_leave') else 'selected'}>No</option>
+                    </select>
+                </label>
+            </div>
+            <div style=\"margin-top:12px;\">
+                <input type=\"submit\" value=\"Save Settings\" />
+            </div>
+            <p class=\"muted\" style=\"margin-top:10px;\">Only join/leave service messages are affected. No other messages are touched.</p>
+        </form>
+        """
+        return HTMLResponse(_html_page("Service Cleanup Settings", form_html))
+    except Exception as e:
+        logger.error("Failed to render cleanup settings: %s", e)
+        return HTMLResponse(_html_page("Error", f"<p>Error: {str(e)}</p>"))
+
+
+@app.post("/admin/settings/service-cleanup")
+async def admin_service_cleanup_settings_save(
+    request: Request,
+    enabled: str = Form("0"),
+    forward_target_id: str = Form("") ,
+    remove_on_join: str = Form("1"),
+    remove_on_leave: str = Form("1"),
+):
+    _require_admin(request)
+    try:
+        en = enabled == "1"
+        roj = remove_on_join == "1"
+        rol = remove_on_leave == "1"
+        fwd_id: Optional[int]
+        try:
+            fwd_id = int(forward_target_id.strip()) if forward_target_id and forward_target_id.strip() else None
+        except Exception:
+            fwd_id = None
+        with SessionLocal() as db:
+            from crud import set_service_cleanup_config
+            set_service_cleanup_config(db, enabled=en, remove_on_join=roj, remove_on_leave=rol, forward_target_id=fwd_id)
+        return RedirectResponse(url="/admin/settings/service-cleanup", status_code=303)
+    except Exception as e:
+        logger.error("Failed to save cleanup settings: %s", e)
+        return HTMLResponse(_html_page("Error", f"<p>Error saving: {str(e)}</p>"))
+
+
 @app.get("/admin/login", response_class=HTMLResponse)
 async def admin_login_form(request: Request):
     try:
@@ -1284,6 +1363,18 @@ async def stripe_webhook_test(request: Request):
 
 def setup_handlers(app: Application):
     """Configura todos os handlers do bot"""
+    # Service cleanup should observe early without consuming updates
+    try:
+        app.add_handler(
+            MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER, service_cleanup_handle_update),
+            group=-1000,
+        )
+    except Exception:
+        pass
+    try:
+        app.add_handler(ChatMemberHandler(service_cleanup_handle_update, ChatMemberHandler.CHAT_MEMBER), group=-1000)
+    except Exception:
+        pass
     # Comandos
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myid", cmd_myid))
