@@ -54,6 +54,7 @@ try:
         get_recent_invite_for_email,
         get_recent_invite_for_user,
         log_invite,
+        is_whitelisted,
     )
     from stripe_handlers import process_stripe_webhook_event
     DATABASE_AVAILABLE = True
@@ -3454,7 +3455,7 @@ async def admin_run_plan_type_migration(request: Request):
     if not DATABASE_AVAILABLE:
         return HTMLResponse(_html_page(
             "Plan Type Migration",
-            "<h1>Banco indisponivel</h1><p>Nao foi possivel acessar o banco de dados.</p><p><a href="/admin/migrations/plan-type">Voltar</a></p>"
+            '<h1>Banco indisponivel</h1><p>Nao foi possivel acessar o banco de dados.</p><p><a href="/admin/migrations/plan-type">Voltar</a></p>'
         ))
 
     with SessionLocal() as db:
@@ -3465,11 +3466,13 @@ async def admin_run_plan_type_migration(request: Request):
 
         dialect = getattr(getattr(bind, "dialect", None), "name", "unknown") if bind else "unknown"
         if dialect not in ("postgresql", "postgres"):
-            message = f"""<h1>Dialeto nao suportado</h1>
-<p>Esta migracao foi feita para PostgreSQL, mas o banco atual e <strong>{html.escape(dialect)}</strong>.</p>
-<p>Execute a migracao diretamente pelo Railway ou ajuste o banco antes de tentar novamente.</p>
-<p><a href="/admin/migrations/plan-type">Voltar</a></p>"""
-            return HTMLResponse(_html_page("Plan Type Migration", message))
+            message_parts = (
+                '<h1>Dialeto nao suportado</h1>',
+                f'<p>Esta migracao foi feita para PostgreSQL, mas o banco atual e <strong>{html.escape(dialect)}</strong>.</p>',
+                '<p>Execute a migracao diretamente pelo Railway ou ajuste o banco antes de tentar novamente.</p>',
+                '<p><a href="/admin/migrations/plan-type">Voltar</a></p>',
+            )
+            return HTMLResponse(_html_page("Plan Type Migration", "".join(message_parts)))
 
         from sqlalchemy import text
 
