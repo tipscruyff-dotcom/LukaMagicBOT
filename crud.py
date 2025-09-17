@@ -1,19 +1,29 @@
 import os
 from datetime import datetime, timedelta
 import logging
-from typing import Optional
+from typing import Optional, Any
 from sqlalchemy.orm import Session
 from models import InviteLog
 
 import models
 logger = logging.getLogger(__name__)
 
-PRICE_PLAN_MAP = {
-    (os.getenv("PRICE_MONTHLY_ID") or "").strip(): "monthly",
-    (os.getenv("PRICE_QUARTERLY_ID") or "").strip(): "quarterly",
-    (os.getenv("PRICE_ANNUAL_ID") or "").strip(): "annual",
-}
-PRICE_PLAN_MAP = {k: v for k, v in PRICE_PLAN_MAP.items() if k}
+def _build_price_plan_map() -> dict[str, str]:
+    plan_lookup: dict[str, str] = {}
+    env_map = {
+        'monthly': os.getenv('PRICE_MONTHLY_ID') or '',
+        'quarterly': os.getenv('PRICE_QUARTERLY_ID') or '',
+        'annual': os.getenv('PRICE_ANNUAL_ID') or '',
+    }
+    for plan_name, raw_ids in env_map.items():
+        for price_id in (raw_ids or '').replace(',', ';').split(';'):
+            price_id = price_id.strip()
+            if price_id:
+                plan_lookup[price_id] = plan_name
+    return plan_lookup
+
+
+PRICE_PLAN_MAP = _build_price_plan_map()
 
 def map_plan_from_price_id(price_id: str):
     if not price_id:
@@ -172,6 +182,9 @@ def upsert_subscription_from_checkout_session(db, session: dict) -> bool:
         Subscription = models.Subscription
         sub = db.query(Subscription).filter(Subscription.email == email).first()
 
+        if not plan_type and sub and getattr(sub, "plan_type", None):
+            plan_type = sub.plan_type
+
         if not sub:
             sub = Subscription(
                 email=email,
@@ -221,19 +234,33 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
 
         email = (invoice.get("customer_email") or "").strip().lower()
         sub_id = invoice.get("subscription")
-        # Try price.id from expanded lines if available
         price_id = None
-        price = {}
-        lines = []
-        try:
-            lines = (invoice.get("lines") or {}).get("data") or []
-            if lines:
-                price = (lines[0].get("price") or {})
-                price_id = price.get("id")
-        except Exception:
-            price_id = None
-            price = {}
-            lines = []
+        price: dict[str, Any] = {}  # type: ignore[var-annotated]
+        lines = (invoice.get("lines") or {}).get("data") or []
+        if lines:
+            line0 = lines[0]
+            raw_price = line0.get("price")
+            if isinstance(raw_price, dict):
+                price = raw_price
+                price_id = raw_price.get("id")
+            elif isinstance(raw_price, str):
+                price_id = raw_price
+                price = {"id": raw_price}
+            price_details = (line0.get("pricing") or {}).get("price_details") or {}
+            if isinstance(price_details, dict):
+                if not price_id:
+                    price_id = price_details.get("id") or price_details.get("price")
+                if price_id and (not price or len(price) <= 1):
+                    price = {**price_details, "id": price_id}
+            if price_id and (not price or len(price) <= 1):
+                try:
+                    import stripe  # type: ignore
+                    if getattr(stripe, "api_key", None):
+                        fetched_price = stripe.Price.retrieve(price_id)  # type: ignore[attr-defined]
+                        if isinstance(fetched_price, dict):
+                            price = dict(fetched_price)
+                except Exception as fetch_err:
+                    logger.debug("Could not retrieve price metadata for %s: %s", price_id, fetch_err)
 
         plan_type = map_plan_from_price_id(price_id) if price_id else None
         if not plan_type:
@@ -242,24 +269,22 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
             plan_obj = lines[0].get("plan") or {}
             plan_type = _plan_type_from_recurring(plan_obj.get("interval"), plan_obj.get("interval_count"))
             if not plan_type:
-                nickname = str(plan_obj.get("nickname") or '').lower()
-                if 'monthly' in nickname or 'mensal' in nickname:
-                    plan_type = 'monthly'
-                elif 'quarter' in nickname or 'trimes' in nickname:
-                    plan_type = 'quarterly'
-                elif 'annual' in nickname or 'anual' in nickname or 'year' in nickname:
-                    plan_type = 'annual'
+                nickname = str(plan_obj.get("nickname") or "").lower()
+                if "monthly" in nickname or "mensal" in nickname:
+                    plan_type = "monthly"
+                elif "quarter" in nickname or "trimes" in nickname:
+                    plan_type = "quarterly"
+                elif "annual" in nickname or "anual" in nickname or "year" in nickname:
+                    plan_type = "annual"
 
         Subscription = models.Subscription
         sub = None
         if email:
             sub = db.query(Subscription).filter(Subscription.email == email).first()
-        # fallback by stripe_subscription_id if email missing
         if not sub and sub_id:
             sub = db.query(Subscription).filter(Subscription.stripe_subscription_id == sub_id).first()
 
         if not sub:
-            # create minimal if nothing exists
             sub = Subscription(
                 email=email or "",
                 stripe_subscription_id=sub_id or None,
@@ -268,7 +293,6 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
             )
-            # expires_at based on plan_type if known
             if plan_type == "monthly":
                 sub.expires_at = datetime.utcnow() + timedelta(days=30)
             elif plan_type == "quarterly":
@@ -280,16 +304,12 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
             logger.info("Created subscription (invoice.paid): email=%s plan=%s sub=%s", email, plan_type, sub_id)
         else:
             changed = False
-            # set sub id
             if sub_id and not getattr(sub, "stripe_subscription_id", None):
                 sub.stripe_subscription_id = sub_id; changed = True
-            # status active
             if sub.status != "active":
                 sub.status = "active"; changed = True
-            # set/keep plan_type
             if plan_type and sub.plan_type != plan_type:
                 sub.plan_type = plan_type; changed = True
-            # extend expires_at
             if plan_type == "monthly":
                 base = sub.expires_at or datetime.utcnow()
                 sub.expires_at = max(base, datetime.utcnow()) + timedelta(days=30); changed = True
@@ -299,7 +319,6 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
             elif plan_type == "annual":
                 base = sub.expires_at or datetime.utcnow()
                 sub.expires_at = max(base, datetime.utcnow()) + timedelta(days=365); changed = True
-
             if changed:
                 sub.updated_at = datetime.utcnow()
                 db.commit()
