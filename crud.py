@@ -20,6 +20,44 @@ def map_plan_from_price_id(price_id: str):
         return None
     return PRICE_PLAN_MAP.get(price_id.strip())
 
+def _plan_type_from_recurring(interval: str | None, interval_count) -> Optional[str]:
+    interval = (interval or '').lower()
+    try:
+        interval_count = int(interval_count or 1)
+    except Exception:
+        interval_count = 1
+    if interval == 'month':
+        if interval_count == 1:
+            return 'monthly'
+        if interval_count in (3, 4):
+            return 'quarterly'
+        if interval_count in (12,):
+            return 'annual'
+    if interval == 'year':
+        return 'annual'
+    return None
+
+
+def infer_plan_type_from_price(price: dict | None) -> Optional[str]:
+    if not isinstance(price, dict):
+        return None
+    recurring = price.get('recurring') or {}
+    plan_type = _plan_type_from_recurring(recurring.get('interval'), recurring.get('interval_count'))
+    if plan_type:
+        return plan_type
+    metadata = price.get('metadata') or {}
+    meta_plan = (metadata.get('plan_type') or metadata.get('tier') or '').strip().lower()
+    if meta_plan in {'monthly', 'quarterly', 'annual'}:
+        return meta_plan
+    nickname = (price.get('nickname') or '').lower()
+    if 'monthly' in nickname or 'mensal' in nickname:
+        return 'monthly'
+    if 'quarter' in nickname or 'trimes' in nickname:
+        return 'quarterly'
+    if 'annual' in nickname or 'anual' in nickname or 'year' in nickname:
+        return 'annual'
+    return None
+
 def _digits_only(s: str) -> str:
     return "".join(ch for ch in (s or "") if ch.isdigit())
 
@@ -117,10 +155,15 @@ def upsert_subscription_from_checkout_session(db, session: dict) -> bool:
                     telegram_id = _digits_only(fld["numeric"].get("value") or "")
                     if telegram_id:
                         break
-        if not telegram_id:
-            md = session.get("metadata") or {}
-            if isinstance(md, dict):
-                telegram_id = _digits_only(md.get("telegram_id") or "")
+        md = session.get("metadata") or {}
+        if not telegram_id and isinstance(md, dict):
+            telegram_id = _digits_only(md.get("telegram_id") or "")
+
+        plan_type_hint = None
+        if isinstance(md, dict):
+            raw_plan = (md.get("plan_type") or md.get("plan") or '').strip().lower()
+            if raw_plan in {"monthly", "quarterly", "annual"}:
+                plan_type_hint = raw_plan
 
         payment_status = session.get("payment_status")
         is_paid = (payment_status == "paid")
@@ -135,7 +178,7 @@ def upsert_subscription_from_checkout_session(db, session: dict) -> bool:
                 full_name=full_name,
                 telegram_user_id=telegram_id or None,
                 stripe_subscription_id=sub_id or None,
-                plan_type=None,  # set later by invoice.paid when price.id known
+                plan_type=plan_type_hint,
                 status="active" if is_paid else "pending",
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
@@ -152,6 +195,8 @@ def upsert_subscription_from_checkout_session(db, session: dict) -> bool:
                 sub.telegram_user_id = telegram_id; changed = True
             if sub_id and not getattr(sub, "stripe_subscription_id", None):
                 sub.stripe_subscription_id = sub_id; changed = True
+            if plan_type_hint and sub.plan_type != plan_type_hint:
+                sub.plan_type = plan_type_hint; changed = True
             if is_paid and sub.status != "active":
                 sub.status = "active"; changed = True
             if changed:
@@ -178,6 +223,8 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
         sub_id = invoice.get("subscription")
         # Try price.id from expanded lines if available
         price_id = None
+        price = {}
+        lines = []
         try:
             lines = (invoice.get("lines") or {}).get("data") or []
             if lines:
@@ -185,8 +232,23 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
                 price_id = price.get("id")
         except Exception:
             price_id = None
+            price = {}
+            lines = []
 
         plan_type = map_plan_from_price_id(price_id) if price_id else None
+        if not plan_type:
+            plan_type = infer_plan_type_from_price(price)
+        if not plan_type and lines:
+            plan_obj = lines[0].get("plan") or {}
+            plan_type = _plan_type_from_recurring(plan_obj.get("interval"), plan_obj.get("interval_count"))
+            if not plan_type:
+                nickname = str(plan_obj.get("nickname") or '').lower()
+                if 'monthly' in nickname or 'mensal' in nickname:
+                    plan_type = 'monthly'
+                elif 'quarter' in nickname or 'trimes' in nickname:
+                    plan_type = 'quarterly'
+                elif 'annual' in nickname or 'anual' in nickname or 'year' in nickname:
+                    plan_type = 'annual'
 
         Subscription = models.Subscription
         sub = None
