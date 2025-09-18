@@ -608,7 +608,7 @@ def get_recent_removal_logs(db: Session, limit: int = 100):
 # ======================
 
 DEFAULT_SETTINGS = {
-    "service_cleanup.enabled": "false",
+    "service_cleanup.enabled": "true",
     "service_cleanup.remove_on_join": "true",
     "service_cleanup.remove_on_leave": "true",
     "service_cleanup.forward_target_id": "",

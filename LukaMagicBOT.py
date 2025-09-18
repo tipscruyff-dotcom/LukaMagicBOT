@@ -1502,16 +1502,16 @@ async def stripe_webhook_test(request: Request):
 
 def setup_handlers(app: Application):
     """Configura todos os handlers do bot"""
-    # Service cleanup should observe early without consuming updates
+    # Service cleanup should observe with ultra-high priority to ensure it processes before others
     try:
         app.add_handler(
             MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER, service_cleanup_handle_update),
-            group=-1000,
+            group=-99999,
         )
     except Exception:
         pass
     try:
-        app.add_handler(ChatMemberHandler(service_cleanup_handle_update, ChatMemberHandler.CHAT_MEMBER), group=-1000)
+        app.add_handler(ChatMemberHandler(service_cleanup_handle_update, ChatMemberHandler.CHAT_MEMBER), group=-99999)
     except Exception:
         pass
     # Comandos

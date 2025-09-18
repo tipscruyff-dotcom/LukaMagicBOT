@@ -15,35 +15,88 @@ logger = logging.getLogger(__name__)
 
 def _is_join_message(update: Update) -> bool:
     try:
+        # Caso 1: Mensagens normais com new_chat_members
         msg = update.effective_message
         if msg and msg.new_chat_members:
             return True
-        # Some joins may arrive as chat_member updates when user joined via link
+            
+        # Caso 2: ChatMemberUpdated para entradas via link
         cm = update.chat_member
         if isinstance(cm, ChatMemberUpdated):
             old_status = cm.old_chat_member.status
             new_status = cm.new_chat_member.status
+            
+            # Detecção básica: usuário estava fora e agora está no grupo
             if old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED) and new_status in (
-                ChatMemberStatus.MEMBER,
+                ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR
             ):
                 return True
-    except Exception:
-        pass
+                
+            # Caso especial para grupos apenas de admins: promoção direta
+            if old_status == ChatMemberStatus.RESTRICTED and new_status in (
+                ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR
+            ):
+                return True
+                
+        # Caso 3: Mensagem com texto indicando entrada (específico para grupos apenas de admins)
+        if msg and msg.text:
+            text = msg.text.lower()
+            # Textos comuns que indicam entrada em diferentes idiomas
+            join_patterns = [
+                "joined the group", "added to group", "entrou no grupo", 
+                "adicionado ao grupo", "added by", "adicionado por", 
+                "joined by", "se unió", "ha entrado", "a rejoint"
+            ]
+            
+            if any(pattern in text for pattern in join_patterns):
+                return True
+                
+    except Exception as e:
+        # Log em caso de erro para facilitar debugging
+        logger.debug(f"Error in _is_join_message: {e}")
+        
     return False
 
 
 def _is_leave_message(update: Update) -> bool:
     try:
+        # Caso 1: Mensagens normais com left_chat_member
         msg = update.effective_message
         if msg and msg.left_chat_member:
             return True
+            
+        # Caso 2: ChatMemberUpdated para saídas
         cm = update.chat_member
         if isinstance(cm, ChatMemberUpdated):
+            old_status = cm.old_chat_member.status
             new_status = cm.new_chat_member.status
+            
+            # Detecção básica: usuário saiu ou foi removido
             if new_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
                 return True
-    except Exception:
-        pass
+                
+            # Caso especial: rebaixamento em grupos apenas de admins
+            if old_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR) and \
+               new_status == ChatMemberStatus.RESTRICTED:
+                return True
+                
+        # Caso 3: Mensagem com texto indicando saída (específico para grupos apenas de admins)
+        if msg and msg.text:
+            text = msg.text.lower()
+            # Textos comuns que indicam saída em diferentes idiomas
+            leave_patterns = [
+                "left the group", "removed from group", "saiu do grupo", 
+                "removido do grupo", "kicked by", "removed by", "removido por", 
+                "salió del grupo", "ha salido", "a quitté"
+            ]
+            
+            if any(pattern in text for pattern in leave_patterns):
+                return True
+                
+    except Exception as e:
+        # Log em caso de erro para facilitar debugging
+        logger.debug(f"Error in _is_leave_message: {e}")
+        
     return False
 
 
@@ -136,10 +189,11 @@ async def _try_delete_message(context: ContextTypes.DEFAULT_TYPE, update: Update
         logger.warning("service_cleanup event=%s action=skip_no_message chat_id=%s", event_type, chat.id if chat else "unknown")
         return False
 
-    # Log message details for debugging
+    # Log message details for debugging with chat type
+    chat_type = getattr(chat, "type", "unknown")
     logger.info(
-        "service_cleanup event=%s attempting to delete message_id=%s in chat=%s",
-        event_type, msg.message_id, chat.id
+        "service_cleanup event=%s attempting to delete message_id=%s in chat=%s (type=%s)",
+        event_type, msg.message_id, chat.id, chat_type
     )
 
     # Enhanced permission check with detailed logging
@@ -168,42 +222,73 @@ async def _try_delete_message(context: ContextTypes.DEFAULT_TYPE, update: Update
             return False
             
         logger.info(
-            "service_cleanup permission check passed: status=%s can_delete=%s", 
-            status, can_delete
+            "service_cleanup permission check passed: status=%s can_delete=%s chat_type=%s", 
+            status, can_delete, chat_type
         )
             
     except Exception as e:
         logger.warning("service_cleanup permission check failed for chat_id=%s: %s", chat.id, e)
         return False
 
-    # Attempt to delete with better error handling
-    try:
-        await context.bot.delete_message(chat_id=chat.id, message_id=msg.message_id)
-        logger.info(
-            "service_cleanup event=%s action=delete chat_id=%s message_id=%s ok=true",
-            event_type,
-            chat.id,
-            msg.message_id,
-        )
-        return True
-    except Exception as e:
-        error_msg = str(e).lower()
-        if "message to delete not found" in error_msg:
-            logger.warning(
-                "service_cleanup event=%s action=delete chat_id=%s message_id=%s ok=false reason=message_not_found",
-                event_type, chat.id, msg.message_id
+    # Attempt to delete with improved retry mechanism and error handling
+    max_retries = 5  # Increased from 3
+    retry_delays = [0.5, 1, 2, 3, 5]  # Progressive delays
+    
+    for attempt in range(max_retries):
+        try:
+            # Add small delay between retries (except first attempt)
+            if attempt > 0:
+                delay = retry_delays[min(attempt-1, len(retry_delays)-1)]
+                logger.info(f"service_cleanup retry attempt {attempt+1}/{max_retries} after {delay}s delay")
+                await asyncio.sleep(delay)
+                
+            await context.bot.delete_message(chat_id=chat.id, message_id=msg.message_id)
+            logger.info(
+                "service_cleanup event=%s action=delete chat_id=%s message_id=%s ok=true attempt=%s",
+                event_type, chat.id, msg.message_id, attempt+1
             )
-        elif "not enough rights" in error_msg or "forbidden" in error_msg:
-            logger.warning(
-                "service_cleanup event=%s action=delete chat_id=%s message_id=%s ok=false reason=permission_denied",
-                event_type, chat.id, msg.message_id
-            )
-        else:
-            logger.warning(
-                "service_cleanup event=%s action=delete chat_id=%s message_id=%s ok=false error=%s",
-                event_type, chat.id, msg.message_id, e
-            )
-        return False
+            return True
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "message to delete not found" in error_msg:
+                logger.warning(
+                    "service_cleanup event=%s action=delete chat_id=%s message_id=%s ok=false reason=message_not_found",
+                    event_type, chat.id, msg.message_id
+                )
+                return False  # No use retrying if message not found
+                
+            elif "not enough rights" in error_msg or "forbidden" in error_msg:
+                logger.warning(
+                    "service_cleanup event=%s action=delete chat_id=%s message_id=%s ok=false reason=permission_denied",
+                    event_type, chat.id, msg.message_id
+                )
+                return False  # No use retrying if permission denied
+                
+            elif "message can't be deleted" in error_msg:
+                logger.warning(
+                    "service_cleanup event=%s action=delete chat_id=%s message_id=%s ok=false reason=cannot_delete",
+                    event_type, chat.id, msg.message_id
+                )
+                # This can happen with very old messages or in some supergroups
+                return False
+                
+            else:
+                # Other errors might be temporary, continue retrying
+                logger.warning(
+                    "service_cleanup event=%s action=delete chat_id=%s message_id=%s ok=false error=%s attempt=%s/%s",
+                    event_type, chat.id, msg.message_id, e, attempt+1, max_retries
+                )
+                
+                if attempt == max_retries - 1:  # Last attempt
+                    logger.error(
+                        "service_cleanup event=%s action=delete chat_id=%s message_id=%s failed after %s attempts: %s",
+                        event_type, chat.id, msg.message_id, max_retries, e
+                    )
+                    return False
+    
+    # Should not reach here, but just in case
+    return False
 
 
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -225,6 +310,27 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             logger.debug("service_cleanup disabled in config, ignoring update")
             return
 
+        # Obter informações detalhadas sobre o chat para melhor debugging
+        chat = update.effective_chat
+        chat_type = "unknown"
+        chat_title = "unknown"
+        is_admin_only = False
+        
+        if chat:
+            chat_type = getattr(chat, "type", "unknown")
+            chat_title = getattr(chat, "title", "unknown")
+            
+            # Detectar se é um grupo onde apenas administradores podem postar
+            try:
+                if hasattr(chat, "permissions"):
+                    chat_permissions = chat.permissions
+                    if hasattr(chat_permissions, "can_send_messages") and chat_permissions.can_send_messages is False:
+                        is_admin_only = True
+                        logger.info("service_cleanup: detected admin-only group %s (id=%s)", chat_title, chat.id)
+            except Exception as e:
+                logger.debug(f"Could not check admin-only status: {e}")
+
+        # Detectar tipo de mensagem (entrada ou saída)
         is_join = _is_join_message(update)
         is_leave = _is_leave_message(update)
         
@@ -233,7 +339,8 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         event_type = "join" if is_join else "leave"
-        logger.info("service_cleanup detected %s event", event_type)
+        logger.info("service_cleanup detected %s event in chat %s (id=%s, type=%s, admin_only=%s)", 
+                   event_type, chat_title, chat.id if chat else "unknown", chat_type, is_admin_only)
 
         # Record seen service message for potential retro cleanup
         try:
