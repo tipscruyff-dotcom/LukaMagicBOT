@@ -37,7 +37,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-# FastAPI and Stripe
+# FastAPI and Stripe dd
 
 # Configure logging
 logging.basicConfig(
@@ -4762,4 +4762,5 @@ async def admin_clear_removal_logs(request: Request):
         """
         
         return HTMLResponse(_html_page("Erro na Limpeza", body))
+
 
