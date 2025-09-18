@@ -585,7 +585,18 @@ async def lifespan(app: FastAPI):
         await application.initialize()
         await application.start()
         webhook_url = f"{PUBLIC_URL}/telegram/{TOKEN}"
-        await application.bot.set_webhook(webhook_url)
+        await application.bot.set_webhook(
+            webhook_url,
+            allowed_updates=[
+                "message",
+                "edited_message",
+                "channel_post",
+                "edited_channel_post",
+                "chat_member",
+                "my_chat_member",
+                "chat_join_request",
+            ],
+        )
         logger.info(f"Bot webhook set to: {webhook_url}")
 
     # Start auto-removal scheduler
