@@ -267,13 +267,13 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
     email = (update.effective_message.text or "").strip().lower()
     if not EMAIL_REGEX.match(email):
         await update.effective_message.reply_text(
-            "⚠️ That doesn't look like a valid email. Try again, please."
+            "Isso nao parece um email valido. Tente novamente, por favor."
         )
         return ASK_EMAIL
 
     if not DATABASE_AVAILABLE:
         await update.effective_message.reply_text(
-            f"✅ Thanks! We received **{email}**. Database integration is being set up.",
+            f"Obrigado! Recebemos **{email}**. A integracao com o banco ainda esta sendo configurada.",
             parse_mode="Markdown"
         )
         return ConversationHandler.END
@@ -283,152 +283,211 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
         try:
             subscription = get_active_and_not_expired_by_email(db, email)
             if subscription:
-                user_id = str(update.effective_user.id)
-                logger.info(
-                    "Trying to link telegram_user_id %s to email %s", user_id, email)
-                success = mark_telegram_id(db, email, user_id)
+                user_id_str = str(update.effective_user.id)
+                user_id_int = update.effective_user.id
+                stored_id = (subscription.telegram_user_id or "").strip() if getattr(subscription, "telegram_user_id", None) else ""
+                if stored_id and stored_id != user_id_str:
+                    logger.warning("Telegram ID %s tentou usar email %s ja vinculado a %s",
+                                   user_id_str, email, stored_id)
+                    await update.effective_message.reply_text(
+                        "ATENCAO: este e-mail ja esta vinculado a outro Telegram. Use o mesmo Telegram da compra ou contate o suporte: @Sthefano_p"
+                    )
+                    return ConversationHandler.END
+
+                logger.info("Trying to link telegram_user_id %s to email %s", user_id_str, email)
+                success = mark_telegram_id(db, email, user_id_str)
                 logger.info("Result of mark_telegram_id: %s", success)
-                if success:
-                    plan_raw = (subscription.plan_type or "").strip()
-                    if not plan_raw:
-                        logger.warning(
-                            "Subscription %s (%s) missing plan_type; defaulting label",
-                            getattr(subscription, "id", "?"), subscription.email)
-                    plan_label = plan_raw.title() if plan_raw else "Unknown"
-
-                    status_raw = (subscription.status or "").strip()
-                    status_label = status_raw.title() if status_raw else "Unknown"
-
-                    # FIRST MESSAGE: Subscription details
-                    subscription_info = (
-                        "✅ **Subscription Found!**\n\n"
-                        f"📧 **Email:** {subscription.email}\n"
-                        f"📋 **Plan:** {plan_label}\n"
-                        f"📅 **Status:** {status_label}\n"
-                        f"⏰ **Expires at:** {subscription.expires_at.strftime('%d/%m/%Y') if subscription.expires_at else 'N/A'}\n\n"
-                        "🔄 Generating your access link..."
-                    )
+                if not success:
                     await update.effective_message.reply_text(
-                        subscription_info,
-                        parse_mode="Markdown"
+                        "Nao foi possivel associar seu Telegram a esta assinatura. Tente novamente ou contate o suporte: @Sthefano_p"
                     )
-                    
-                    # Pequeno delay para melhor UX
-                    await asyncio.sleep(1.5)
-                    
-                    # SECOND MESSAGE: Temporary link (with cooldown control)
-                    try:
-                        logger.info(f"🔗 Generating invite link for user {user_id}")
-                        cooldown_seconds = int(os.getenv("INVITE_COOLDOWN_SECONDS", "180"))
-                        # Checar por email E por telegram_user_id
-                        recent_email = get_recent_invite_for_email(db, email, cooldown_seconds)
-                        recent_user = get_recent_invite_for_user(db, user_id, cooldown_seconds)
-                        recent = recent_email or recent_user
-                        if recent:
-                            # Em vez de reutilizar, avisar cooldown restante
-                            now = datetime.utcnow()
-                            elapsed = (now - recent.created_at).total_seconds()
-                            remaining = max(0, int(cooldown_seconds - elapsed))
-                            await update.effective_message.reply_text(
-                                f"⏳ Please wait {remaining} seconds before requesting a new invite link.")
-                            return ConversationHandler.END
-                        
-                        # Generate invite link
-                        invite_link = await create_one_time_invite_link(
-                            context.bot, update.effective_user.id)
-                        is_temporary = invite_link != VIP_INVITE_LINK
-                        expires_at = (datetime.utcnow() + timedelta(hours=1)) if is_temporary else None
-                        
-                        # Log the invite
-                        log_invite(
-                            db,
-                            email=email,
-                            telegram_user_id=user_id,
-                            invite_link=invite_link,
-                            expires_at=expires_at,
-                            member_limit=1,
-                            is_temporary=is_temporary,
-                        )
-                        
-                        # Check whether the link is temporary or fallback
-                        link_type = "temporary (1 use)" if is_temporary else "static"
-                        
-                        # Format message for multiple links
-                        if "\n" in invite_link:
-                            # Multiple links (one per line)
-                            links_text = "\n".join([f"🔗 {link}" for link in invite_link.split("\n")])
-                            links_count = len(invite_link.split("\n"))
-                            await update.effective_message.reply_text(
-                                f"🎉 **Access Granted!**\n\n"
-                                f"🔗 **Your VIP links ({link_type}):**\n{links_text}\n\n"
-                                f"📊 **Total:** {links_count} VIP groups\n\n"
-                                "⏰ **Important:**\n"
-                                f"• {'These links expire in 1 hour' if is_temporary else 'Permanent group links'}\n"
-                                f"• {'Valid for one person only' if is_temporary else 'Can be used multiple times'}\n"
-                                "• Use them to join the VIP groups\n\n"
-                                "🎯 Welcome to VIP!",
-                                parse_mode="Markdown",
-                                disable_web_page_preview=True
-                            )
+                    return ConversationHandler.END
+
+                plan_raw = (subscription.plan_type or "").strip()
+                if not plan_raw:
+                    logger.warning(
+                        "Subscription %s (%s) missing plan_type; defaulting label",
+                        getattr(subscription, "id", "?"), subscription.email)
+                plan_label = plan_raw.title() if plan_raw else "Unknown"
+
+                status_raw = (subscription.status or "").strip()
+                status_label = status_raw.title() if status_raw else "Unknown"
+
+                membership_present: List[int] = []
+                membership_missing: Optional[List[int]] = None
+                membership_errors: dict[int, str] = {}
+
+                if VIP_GROUP_IDS:
+                    membership_missing = []
+                    for group_id in VIP_GROUP_IDS:
+                        try:
+                            member = await context.bot.get_chat_member(group_id, user_id_int)
+                            status = getattr(member, "status", "")
+                            if status in {"creator", "administrator", "member"}:
+                                membership_present.append(group_id)
+                            else:
+                                membership_missing.append(group_id)
+                        except Exception as e:
+                            membership_errors[group_id] = str(e)
+                            membership_missing.append(group_id)
+                    logger.info(
+                        "Membership check for user %s: present=%s missing=%s errors=%s",
+                        user_id_str, membership_present, membership_missing, membership_errors)
+
+                expires_label = subscription.expires_at.strftime('%d/%m/%Y') if subscription.expires_at else 'N/A'
+
+                membership_notes: List[str] = []
+                if VIP_GROUP_IDS:
+                    if membership_present:
+                        membership_notes.append("- Ja esta nos grupos: " + ", ".join(str(g) for g in membership_present))
+                    if membership_missing is not None:
+                        if membership_missing:
+                            membership_notes.append("- Ainda falta entrar nos grupos: " + ", ".join(str(g) for g in membership_missing))
                         else:
-                            # Single link (fallback)
-                            await update.effective_message.reply_text(
-                                "🎉 **Access Granted!**\n\n"
-                                f"🔗 **Your VIP link ({link_type}):**\n{invite_link}\n\n"
-                                "⏰ **Important:**\n"
-                                f"• {'This link expires in 1 hour' if is_temporary else 'Permanent group link'}\n"
-                                f"• {'Valid for one person only' if is_temporary else 'Can be used multiple times'}\n"
-                                "• Use it to join the VIP group\n\n"
-                                "🎯 Welcome to VIP!",
-                                parse_mode="Markdown",
-                                disable_web_page_preview=True
-                            )
-                        logger.info(
-                            "✅ VIP access granted to user %s for email %s (link type: %s)", 
-                            user_id, email, link_type)
-                    except Exception as e:
-                        logger.error("❌ Error in invite link process: %s", e, exc_info=True)
-                        await update.effective_message.reply_text(
-                            "⚠️ Error generating invite link. Please contact support: @Sthefano_p"
-                        )
-                else:
-                    logger.error(
-                        "Failed to link telegram_user_id %s to email %s", user_id, email)
+                            membership_notes.append("- Voce ja esta em todos os grupos VIP.")
+                    if membership_errors:
+                        membership_notes.append("- Nao foi possivel confirmar alguns grupos, enviaremos links por seguranca.")
+
+                subscription_info = (
+                    "**Assinatura encontrada!**\n\n"
+                    f"- Email: {subscription.email}\n"
+                    f"- Plano: {plan_label}\n"
+                    f"- Status: {status_label}\n"
+                    f"- Expira em: {expires_label}"
+                )
+                if membership_notes:
+                    subscription_info += "\n" + "\n".join(membership_notes)
+
+                pending_groups: Optional[List[int]] = None
+                should_generate_links = True
+                if membership_missing is not None:
+                    pending_groups = membership_missing
+                    should_generate_links = len(pending_groups) > 0
+
+                if should_generate_links:
+                    subscription_info += "\n\nGerando seu link de acesso..."
+
+                await update.effective_message.reply_text(
+                    subscription_info,
+                    parse_mode="Markdown"
+                )
+
+                if membership_missing is not None and not should_generate_links:
                     await update.effective_message.reply_text(
-                        "⚠️ Technical error. Please try again or contact support."
+                        "Voce ja possui acesso a todos os grupos VIP configurados. Nenhum link novo foi necessario."
+                    )
+                    return ConversationHandler.END
+
+                if not should_generate_links:
+                    pending_groups = None
+
+                await asyncio.sleep(1.5)
+
+                try:
+                    logger.info(f"Gerando invite link para usuario {user_id_str}")
+                    cooldown_seconds = int(os.getenv("INVITE_COOLDOWN_SECONDS", "180"))
+                    recent_email = get_recent_invite_for_email(db, email, cooldown_seconds)
+                    recent_user = get_recent_invite_for_user(db, user_id_str, cooldown_seconds)
+                    recent = recent_email or recent_user
+                    if recent:
+                        now = datetime.utcnow()
+                        elapsed = (now - recent.created_at).total_seconds()
+                        remaining = max(0, int(cooldown_seconds - elapsed))
+                        await update.effective_message.reply_text(
+                            f"Aguarde {remaining} segundos antes de solicitar um novo link de convite.")
+                        return ConversationHandler.END
+
+                    invite_link = await create_one_time_invite_link(
+                        context.bot, user_id_int, group_ids=pending_groups)
+                    is_temporary = invite_link != VIP_INVITE_LINK
+                    expires_at = (datetime.utcnow() + timedelta(hours=1)) if is_temporary else None
+
+                    log_invite(
+                        db,
+                        email=email,
+                        telegram_user_id=user_id_str,
+                        invite_link=invite_link,
+                        expires_at=expires_at,
+                        member_limit=1,
+                        is_temporary=is_temporary,
+                    )
+
+                    link_type = "temporario (1 uso)" if is_temporary else "estatico"
+
+                    grupos_texto = ""
+                    if pending_groups:
+                        grupos_texto = "\n- Grupos atendidos: " + ", ".join(str(g) for g in pending_groups)
+
+                    if "\n" in invite_link:
+                        links_text = "\n".join([f"- {link}" for link in invite_link.split("\n")])
+                        message = (
+                            "**Acesso liberado!**\n\n"
+                            f"Links {link_type}:\n{links_text}\n\n"
+                            "**Importante:**\n"
+                            f"- {'Esses links expiram em 1 hora' if is_temporary else 'Links permanentes'}\n"
+                            f"- {'Validos para uma pessoa' if is_temporary else 'Podem ser usados varias vezes'}\n"
+                            f"{grupos_texto}\n"
+                            "\nBem-vindo ao VIP!"
+                        )
+                        await update.effective_message.reply_text(
+                            message,
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True
+                        )
+                    else:
+                        message = (
+                            "**Acesso liberado!**\n\n"
+                            f"- Link {link_type}: {invite_link}\n"
+                            "\n**Importante:**\n"
+                            f"- {'Este link expira em 1 hora' if is_temporary else 'Link permanente'}\n"
+                            f"- {'Valido para uma pessoa' if is_temporary else 'Pode ser usado varias vezes'}\n"
+                            f"{grupos_texto}\n"
+                            "\nUse o link para entrar no grupo VIP.\n\nBem-vindo ao VIP!"
+                        )
+                        await update.effective_message.reply_text(
+                            message,
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True
+                        )
+                    logger.info(
+                        "Acesso VIP liberado para user %s email %s (link type: %s)",
+                        user_id_str, email, link_type)
+                except Exception as e:
+                    logger.error("Erro ao gerar link de convite: %s", e, exc_info=True)
+                    await update.effective_message.reply_text(
+                        "Erro ao gerar o link de acesso. Fale com o suporte: @Sthefano_p"
                     )
             else:
-                # Check if there is a subscription but expired
                 any_sub = None
                 try:
                     any_sub = get_active_by_email(db, email)
                 except Exception:
                     any_sub = None
                 if any_sub and any_sub.expires_at and any_sub.expires_at < datetime.utcnow():
-                    # expired
-                    keyboard = [[InlineKeyboardButton("🌟 Plans", callback_data="plans.open")]]
+                    keyboard = [[InlineKeyboardButton("?YOY Plans", callback_data="plans.open")]]
                     await update.effective_message.reply_text(
-                        "❌ Your subscription has expired. Please renew your plan to continue. 💳",
+                        "??O Your subscription has expired. Please renew your plan to continue. ?Y'?",
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
                 else:
                     await update.effective_message.reply_text(
-                        "❌ Subscription not found for this email.\n\n"
+                        "??O Subscription not found for this email.\n\n"
                         "Please check if the payment was completed, if the email is correct, or try again later.\n"
                         "If you need help, contact support: @Sthefano_p"
                     )
         except (ValueError, TypeError) as e:
             logger.error("Database error in unlock_access_check_email: %s", e)
             await update.effective_message.reply_text(
-                "⚠️ Technical database error. Please try again or contact support: @Sthefano_p"
+                "??O Technical database error. Please try again or contact support: @Sthefano_p"
             )
         except Exception as e:
             logger.critical(
                 "Unexpected error in unlock_access_check_email: %s", e, exc_info=True)
             await update.effective_message.reply_text(
-                "⚠️ Unexpected error. Please contact support: @Sthefano_p"
+                "??O Unexpected error. Please contact support: @Sthefano_p"
             )
     return ConversationHandler.END
+
 
 
 async def unlock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -440,43 +499,58 @@ async def unlock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ======================
 
 
-async def create_one_time_invite_link(bot, user_id: int, ttl_seconds: int = 3600, member_limit: int = 1) -> str:
+async def create_one_time_invite_link(
+    bot,
+    user_id: int,
+    ttl_seconds: int = 3600,
+    member_limit: int = 1,
+    group_ids: Optional[List[int]] = None,
+) -> str:
     """
-    Generate one-time invite links for all VIP groups
+    Generate one-time invite links for selected VIP groups.
 
     Args:
         bot: Bot instance
         user_id: Telegram user ID (for logs)
         ttl_seconds: Time to live in seconds (default: 1 hour)
         member_limit: Members limit (default: 1)
+        group_ids: Optional list of group IDs to target. Defaults to all VIP groups.
 
     Returns:
         Invite URLs (one-time or fallback)
     """
     logger.info(f"Starting invite link creation for user {user_id}")
     logger.info(f"Configured VIP_GROUP_IDS: {VIP_GROUP_IDS}")
-    logger.info(f"Fallback VIP_INVITE_LINK: {VIP_INVITE_LINK}")
-    
+    logger.info(f"Requested group_ids: {group_ids}")
+
     allow_fallback = os.getenv("ALLOW_FALLBACK_INVITE", "0") == "1"
-    if not VIP_GROUP_IDS:
+
+    target_groups: List[int] = []
+    candidate_groups = group_ids if group_ids is not None else VIP_GROUP_IDS
+    if candidate_groups:
+        try:
+            target_groups = [int(g) for g in candidate_groups if str(g).strip()]
+        except Exception as conversion_error:
+            logger.warning("Could not normalise group IDs %s: %s", candidate_groups, conversion_error)
+            target_groups = [int(g) for g in VIP_GROUP_IDS]
+
+    if not target_groups:
         if allow_fallback:
-            logger.warning("No VIP_GROUP_IDS configured, using fallback link (dev mode)")
+            logger.warning("No target VIP groups supplied, using fallback link")
             logger.info(f"Returning fallback link: {VIP_INVITE_LINK}")
             return VIP_INVITE_LINK
         logger.error("VIP group configuration missing and fallback disabled")
         raise RuntimeError("VIP group configuration is missing. Please contact support.")
 
-    # Use epoch timestamp and disable join requests (1 hour, 1 use)
     expire_epoch = int((datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).timestamp())
     logger.info(f"Links will expire at epoch: {expire_epoch}")
 
-    invite_links = []
-    
-    # Generate links for all groups
-    for group_id in VIP_GROUP_IDS:
+    invite_links: List[str] = []
+
+    for group_id in target_groups:
         try:
             logger.info(f"Trying to create invite for group: {group_id}")
-            
+
             invite_link = await bot.create_chat_invite_link(
                 chat_id=group_id,
                 expire_date=expire_epoch,
@@ -487,30 +561,31 @@ async def create_one_time_invite_link(bot, user_id: int, ttl_seconds: int = 3600
 
             invite_links.append(invite_link.invite_link)
             logger.info(
-                "✅ Created one-time invite for user %s in group %s: %s",
+                "Created one-time invite for user %s in group %s: %s",
                 user_id, group_id, invite_link.invite_link)
 
         except Exception as e:
             error_msg = str(e)
             if "not enough rights" in error_msg.lower() or "forbidden" in error_msg.lower():
-                logger.error("❌ Bot lacks admin permissions in group %s: %s", group_id, error_msg)
+                logger.error("Bot lacks admin permissions in group %s: %s", group_id, error_msg)
             else:
-                logger.error("❌ Error creating invite link for user %s in group %s: %s",
+                logger.error("Error creating invite link for user %s in group %s: %s",
                              user_id, group_id, e, exc_info=True)
             # Continue with other groups even if one fails
 
     if invite_links:
-        # Return all links separated by newlines
         all_links = "\n".join(invite_links)
-        logger.info("✅ Successfully created %d invite links for user %s", len(invite_links), user_id)
+        logger.info("Successfully created %d invite links for user %s", len(invite_links), user_id)
         return all_links
     else:
-        # If no links were created, use fallback
         if allow_fallback:
-            logger.warning("🔄 Using fallback VIP link due to errors (dev mode)")
+            logger.warning("Using fallback VIP link due to errors")
             logger.info(f"Returning fallback link: {VIP_INVITE_LINK}")
             return VIP_INVITE_LINK
         raise RuntimeError("Failed to create invite links for any VIP group. Please contact support.")
+
+
+# ======================
 
 # ======================
 # Button router

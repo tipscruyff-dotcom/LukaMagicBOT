@@ -121,16 +121,33 @@ def update_full_name_if_empty(db, email: str, full_name: str) -> bool:
 def mark_telegram_id(db, email: str, telegram_user_id: str) -> bool:
     if not email or not telegram_user_id:
         return False
-    sub = db.query(models.Subscription).filter(models.Subscription.email == email.lower().strip()).first()
+
+    normalized_email = email.lower().strip()
+    new_id = str(telegram_user_id).strip()
+    if not new_id:
+        return False
+
+    sub = db.query(models.Subscription).filter(models.Subscription.email == normalized_email).first()
     if not sub:
         return False
-    sub.telegram_user_id = telegram_user_id
+
+    current_id = getattr(sub, "telegram_user_id", None)
+    if current_id:
+        current_id_str = str(current_id).strip()
+        if current_id_str == new_id:
+            logger.info("Telegram ID already linked for email=%s", normalized_email)
+            return True
+        logger.warning("Telegram ID mismatch for email=%s (existing=%s, requested=%s)",
+                       normalized_email, current_id_str, new_id)
+        return False
+
+    sub.telegram_user_id = new_id
     try:
         sub.updated_at = datetime.utcnow()
     except Exception:
         pass
     db.commit()
-    logger.info("Telegram ID set for email=%s", email)
+    logger.info("Telegram ID set for email=%s", normalized_email)
     return True
 
 def upsert_subscription_from_checkout_session(db, session: dict) -> bool:
