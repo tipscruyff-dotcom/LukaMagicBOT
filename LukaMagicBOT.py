@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional, List
+from dataclasses import dataclass
 from contextlib import asynccontextmanager
 import html
 import uvicorn
@@ -363,6 +364,26 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
                 if membership_missing is not None:
                     pending_groups = membership_missing
                     should_generate_links = len(pending_groups) > 0
+                    if pending_groups:
+                        unique_groups: List[int] = []
+                        seen_groups: set[int] = set()
+                        for group_id in pending_groups:
+                            if group_id in seen_groups:
+                                continue
+                            unique_groups.append(group_id)
+                            seen_groups.add(group_id)
+                        pending_groups = unique_groups
+                        for group_id in pending_groups:
+                            try:
+                                await context.bot.unban_chat_member(group_id, user_id_int, only_if_banned=True)
+                            except Exception as unban_err:
+                                logger.debug(
+                                    "Unban check for user %s in group %s failed or not needed: %s",
+                                    user_id_str,
+                                    group_id,
+                                    unban_err,
+                                )
+
 
                 if should_generate_links:
                     subscription_info += "\n\nGerando seu link de acesso..."
@@ -397,16 +418,20 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
                             f"Aguarde {remaining} segundos antes de solicitar um novo link de convite.")
                         return ConversationHandler.END
 
-                    invite_link = await create_one_time_invite_link(
+                    result = await create_one_time_invite_link(
                         context.bot, user_id_int, group_ids=pending_groups)
-                    is_temporary = invite_link != VIP_INVITE_LINK
+                    if not result.links:
+                        raise RuntimeError("Invite generation returned no links")
+
+                    link_bundle = result.as_text()
+                    is_temporary = not result.used_fallback
                     expires_at = (datetime.utcnow() + timedelta(hours=1)) if is_temporary else None
 
                     log_invite(
                         db,
                         email=email,
                         telegram_user_id=user_id_str,
-                        invite_link=invite_link,
+                        invite_link=link_bundle,
                         expires_at=expires_at,
                         member_limit=1,
                         is_temporary=is_temporary,
@@ -414,44 +439,44 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
 
                     link_type = "temporario (1 uso)" if is_temporary else "estatico"
 
+                    served_groups = result.success_groups or (pending_groups or [])
                     grupos_texto = ""
-                    if pending_groups:
-                        grupos_texto = "\n- Grupos atendidos: " + ", ".join(str(g) for g in pending_groups)
+                    if served_groups:
+                        grupos_texto = "\n- Grupos atendidos: " + ", ".join(str(g) for g in served_groups)
 
-                    if "\n" in invite_link:
-                        links_text = "\n".join([f"- {link}" for link in invite_link.split("\n")])
-                        message = (
-                            "**Acesso liberado!**\n\n"
-                            f"Links {link_type}:\n{links_text}\n\n"
-                            "**Importante:**\n"
-                            f"- {'Esses links expiram em 1 hora' if is_temporary else 'Links permanentes'}\n"
-                            f"- {'Validos para uma pessoa' if is_temporary else 'Podem ser usados varias vezes'}\n"
-                            f"{grupos_texto}\n"
-                            "\nBem-vindo ao VIP!"
-                        )
-                        await update.effective_message.reply_text(
-                            message,
-                            parse_mode="Markdown",
-                            disable_web_page_preview=True
-                        )
-                    else:
-                        message = (
-                            "**Acesso liberado!**\n\n"
-                            f"- Link {link_type}: {invite_link}\n"
-                            "\n**Importante:**\n"
-                            f"- {'Este link expira em 1 hora' if is_temporary else 'Link permanente'}\n"
-                            f"- {'Valido para uma pessoa' if is_temporary else 'Pode ser usado varias vezes'}\n"
-                            f"{grupos_texto}\n"
-                            "\nUse o link para entrar no grupo VIP.\n\nBem-vindo ao VIP!"
-                        )
-                        await update.effective_message.reply_text(
-                            message,
-                            parse_mode="Markdown",
-                            disable_web_page_preview=True
-                        )
+                    failed_text = ""
+                    if result.failed_groups:
+                        failed_ids = ", ".join(str(g) for g in result.failed_groups.keys())
+                        failed_text = "\n- Falha ao gerar link para: " + failed_ids
+                    if result.used_fallback:
+                        failed_text += "\n- Utilizando link de fallback (contate o suporte se persistir)."
+
+                    links_text = "\n".join(f"- {link}" for link in result.links)
+                    detalhes_texto = f"{grupos_texto}{failed_text}"
+
+                    message = (
+                        "**Acesso liberado!**\n\n"
+                        f"Links {link_type}:\n{links_text}\n\n"
+                        "**Importante:**\n"
+                        f"- {'Esses links expiram em 1 hora' if is_temporary else 'Links permanentes'}\n"
+                        f"- {'Validos para uma pessoa' if is_temporary else 'Podem ser usados varias vezes'}"
+                        f"{detalhes_texto}\n"
+                        "\nBem-vindo ao VIP!"
+                    )
+
+                    await update.effective_message.reply_text(
+                        message,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True
+                    )
                     logger.info(
-                        "Acesso VIP liberado para user %s email %s (link type: %s)",
-                        user_id_str, email, link_type)
+                        "Acesso VIP liberado para user %s email %s (link type: %s, groups_ok=%s, groups_failed=%s)",
+                        user_id_str,
+                        email,
+                        link_type,
+                        served_groups,
+                        list(result.failed_groups.keys()),
+                    )
                 except Exception as e:
                     logger.error("Erro ao gerar link de convite: %s", e, exc_info=True)
                     await update.effective_message.reply_text(
@@ -499,13 +524,24 @@ async def unlock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ======================
 
 
+@dataclass
+class InviteLinksResult:
+    links: List[str]
+    success_groups: List[int]
+    failed_groups: dict[int, str]
+    used_fallback: bool = False
+
+    def as_text(self) -> str:
+        return "\n".join(self.links)
+
+
 async def create_one_time_invite_link(
     bot,
     user_id: int,
     ttl_seconds: int = 3600,
     member_limit: int = 1,
     group_ids: Optional[List[int]] = None,
-) -> str:
+) -> InviteLinksResult:
     """
     Generate one-time invite links for selected VIP groups.
 
@@ -517,7 +553,7 @@ async def create_one_time_invite_link(
         group_ids: Optional list of group IDs to target. Defaults to all VIP groups.
 
     Returns:
-        Invite URLs (one-time or fallback)
+        InviteLinksResult with generated links and bookkeeping.
     """
     logger.info(f"Starting invite link creation for user {user_id}")
     logger.info(f"Configured VIP_GROUP_IDS: {VIP_GROUP_IDS}")
@@ -538,7 +574,7 @@ async def create_one_time_invite_link(
         if allow_fallback:
             logger.warning("No target VIP groups supplied, using fallback link")
             logger.info(f"Returning fallback link: {VIP_INVITE_LINK}")
-            return VIP_INVITE_LINK
+            return InviteLinksResult(links=[VIP_INVITE_LINK], success_groups=[], failed_groups={}, used_fallback=True)
         logger.error("VIP group configuration missing and fallback disabled")
         raise RuntimeError("VIP group configuration is missing. Please contact support.")
 
@@ -546,6 +582,8 @@ async def create_one_time_invite_link(
     logger.info(f"Links will expire at epoch: {expire_epoch}")
 
     invite_links: List[str] = []
+    success_groups: List[int] = []
+    failed_groups: dict[int, str] = {}
 
     for group_id in target_groups:
         try:
@@ -560,12 +598,14 @@ async def create_one_time_invite_link(
             )
 
             invite_links.append(invite_link.invite_link)
+            success_groups.append(group_id)
             logger.info(
                 "Created one-time invite for user %s in group %s: %s",
                 user_id, group_id, invite_link.invite_link)
 
         except Exception as e:
             error_msg = str(e)
+            failed_groups[group_id] = error_msg
             if "not enough rights" in error_msg.lower() or "forbidden" in error_msg.lower():
                 logger.error("Bot lacks admin permissions in group %s: %s", group_id, error_msg)
             else:
@@ -574,15 +614,15 @@ async def create_one_time_invite_link(
             # Continue with other groups even if one fails
 
     if invite_links:
-        all_links = "\n".join(invite_links)
         logger.info("Successfully created %d invite links for user %s", len(invite_links), user_id)
-        return all_links
-    else:
-        if allow_fallback:
-            logger.warning("Using fallback VIP link due to errors")
-            logger.info(f"Returning fallback link: {VIP_INVITE_LINK}")
-            return VIP_INVITE_LINK
-        raise RuntimeError("Failed to create invite links for any VIP group. Please contact support.")
+        return InviteLinksResult(links=invite_links, success_groups=success_groups, failed_groups=failed_groups)
+
+    if allow_fallback:
+        logger.warning("Using fallback VIP link due to errors")
+        logger.info(f"Returning fallback link: {VIP_INVITE_LINK}")
+        return InviteLinksResult(links=[VIP_INVITE_LINK], success_groups=[], failed_groups=failed_groups, used_fallback=True)
+
+    raise RuntimeError("Failed to create invite links for any VIP group. Please contact support.")
 
 
 # ======================
