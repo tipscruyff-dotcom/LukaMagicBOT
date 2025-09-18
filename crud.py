@@ -235,7 +235,7 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
         email = (invoice.get("customer_email") or "").strip().lower()
         sub_id = invoice.get("subscription")
         price_id = None
-        price: dict[str, Any] = {}  # type: ignore[var-annotated]
+        price: dict[str, Any] = {}
         lines = (invoice.get("lines") or {}).get("data") or []
         if lines:
             line0 = lines[0]
@@ -277,6 +277,12 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
                 elif "annual" in nickname or "anual" in nickname or "year" in nickname:
                     plan_type = "annual"
 
+        customer_name = (invoice.get("customer_name") or (invoice.get("customer_details") or {}).get("name") or "").strip()
+        invoice_metadata = invoice.get("metadata") or {}
+        telegram_meta = ""
+        if isinstance(invoice_metadata, dict):
+            telegram_meta = _digits_only(invoice_metadata.get("telegram_id") or "")
+
         Subscription = models.Subscription
         sub = None
         if email:
@@ -284,9 +290,14 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
         if not sub and sub_id:
             sub = db.query(Subscription).filter(Subscription.stripe_subscription_id == sub_id).first()
 
+        if sub and not plan_type and getattr(sub, "plan_type", None):
+            plan_type = sub.plan_type
+
         if not sub:
             sub = Subscription(
                 email=email or "",
+                full_name=customer_name or None,
+                telegram_user_id=telegram_meta or None,
                 stripe_subscription_id=sub_id or None,
                 plan_type=plan_type,
                 status="active",
@@ -305,20 +316,32 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
         else:
             changed = False
             if sub_id and not getattr(sub, "stripe_subscription_id", None):
-                sub.stripe_subscription_id = sub_id; changed = True
+                sub.stripe_subscription_id = sub_id
+                changed = True
             if sub.status != "active":
-                sub.status = "active"; changed = True
+                sub.status = "active"
+                changed = True
             if plan_type and sub.plan_type != plan_type:
-                sub.plan_type = plan_type; changed = True
+                sub.plan_type = plan_type
+                changed = True
+            if customer_name and not getattr(sub, "full_name", None):
+                sub.full_name = customer_name
+                changed = True
+            if telegram_meta and not getattr(sub, "telegram_user_id", None):
+                sub.telegram_user_id = telegram_meta
+                changed = True
             if plan_type == "monthly":
                 base = sub.expires_at or datetime.utcnow()
-                sub.expires_at = max(base, datetime.utcnow()) + timedelta(days=30); changed = True
+                sub.expires_at = max(base, datetime.utcnow()) + timedelta(days=30)
+                changed = True
             elif plan_type == "quarterly":
                 base = sub.expires_at or datetime.utcnow()
-                sub.expires_at = max(base, datetime.utcnow()) + timedelta(days=90); changed = True
+                sub.expires_at = max(base, datetime.utcnow()) + timedelta(days=90)
+                changed = True
             elif plan_type == "annual":
                 base = sub.expires_at or datetime.utcnow()
-                sub.expires_at = max(base, datetime.utcnow()) + timedelta(days=365); changed = True
+                sub.expires_at = max(base, datetime.utcnow()) + timedelta(days=365)
+                changed = True
             if changed:
                 sub.updated_at = datetime.utcnow()
                 db.commit()
@@ -328,6 +351,7 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
     except Exception as e:
         logger.warning("upsert_subscription_from_invoice failed: %s", e, exc_info=True)
         return False
+
 
 # ======================
 # Invite control helpers
