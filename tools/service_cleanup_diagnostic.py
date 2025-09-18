@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # service_cleanup_diagnostic.py
-# Tool to diagnose and fix service message cleanup issues
+# Tool to diagnose and fix service message cleanup issues - Version 2.0
 
 import os
 import sys
 import logging
 from datetime import datetime
 import asyncio
+import argparse
 from telegram import Bot, Chat
+from typing import Optional, Dict, List, Any
 
 # Configure logging
 logging.basicConfig(
@@ -25,17 +27,37 @@ except ImportError:
     logger.error("❌ Failed to import required modules. Make sure to run this script from the project root.")
     sys.exit(1)
 
-async def check_bot_permissions(token, chat_ids):
-    """Check if the bot has necessary permissions in the given groups"""
+async def check_bot_permissions(token: str, chat_ids: List[str]) -> Optional[Dict[str, Any]]:
+    """Check if the bot has necessary permissions in the given groups
+    
+    Args:
+        token: Bot token to use for authentication
+        chat_ids: List of chat IDs to check
+        
+    Returns:
+        Dictionary with results of permission checks or None if connection failed
+    """
+    if not token:
+        logger.error("❌ Bot token is empty or invalid")
+        return None
+        
     bot = Bot(token=token)
     results = {}
     
-    try:
-        bot_info = await bot.get_me()
-        logger.info(f"✅ Bot connected: @{bot_info.username} (ID: {bot_info.id})")
-    except Exception as e:
-        logger.error(f"❌ Failed to connect to bot: {e}")
-        return None
+    # Test API connection with retry logic
+    retry_count = 3
+    for attempt in range(retry_count):
+        try:
+            bot_info = await bot.get_me()
+            logger.info(f"✅ Bot connected: @{bot_info.username} (ID: {bot_info.id})")
+            break
+        except Exception as e:
+            if attempt < retry_count - 1:
+                logger.warning(f"⚠️ Connection attempt {attempt+1} failed: {e}. Retrying...")
+                await asyncio.sleep(1)
+            else:
+                logger.error(f"❌ Failed to connect to bot after {retry_count} attempts: {e}")
+                return None
     
     for chat_id in chat_ids:
         try:
@@ -118,6 +140,55 @@ async def check_bot_permissions(token, chat_ids):
             }
     
     return results
+
+async def check_database_health():
+    """Check the health and structure of the database tables related to service cleanup"""
+    try:
+        with SessionLocal() as db:
+            # Check if ServiceMessageSeen table exists and its structure
+            try:
+                result = db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='service_message_seen'")
+                table_exists = result.scalar() > 0
+                
+                if not table_exists:
+                    logger.error("❌ ServiceMessageSeen table doesn't exist in the database")
+                    return False
+                    
+                # Check for key columns
+                column_check = db.execute("PRAGMA table_info(service_message_seen)").fetchall()
+                columns = [col[1] for col in column_check]  # column name is at index 1
+                
+                required_columns = ['id', 'chat_id', 'message_id', 'seen_at', 'event_type', 'deleted', 'delete_ok', 'last_error']
+                missing_columns = [col for col in required_columns if col not in columns]
+                
+                if missing_columns:
+                    logger.error(f"❌ ServiceMessageSeen table is missing columns: {', '.join(missing_columns)}")
+                    return False
+                
+                logger.info("✅ ServiceMessageSeen table structure verified")
+                
+                # Count records
+                count = db.query(ServiceMessageSeen).count()
+                logger.info(f"📊 Found {count} service message records")
+                
+                # Check Setting table and service cleanup settings
+                result = db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='settings'")
+                settings_table_exists = result.scalar() > 0
+                
+                if not settings_table_exists:
+                    logger.warning("⚠️ Settings table doesn't exist - will use default values")
+                else:
+                    logger.info("✅ Settings table exists")
+                
+                return True
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to check database structure: {e}")
+                return False
+                
+    except Exception as e:
+        logger.error(f"❌ Failed to connect to database: {e}")
+        return False
 
 async def check_service_cleanup_config():
     """Check the current service cleanup configuration"""
@@ -315,36 +386,72 @@ async def perform_handler_test(token, chat_id):
         return False
 
 async def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Diagnose and fix service message cleanup issues")
+    parser.add_argument("--token", help="Telegram Bot token (overrides BOT_TOKEN env variable)")
+    parser.add_argument("--groups", help="Comma-separated list of group IDs (overrides VIP_GROUP_IDS env variable)")
+    parser.add_argument("--check-db", action="store_true", help="Check database health")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--interactive", "-i", action="store_true", help="Interactive mode (prompt for missing values)")
+    parser.add_argument("--test-message", type=int, help="Test message deletion with specific message ID")
+    parser.add_argument("--test-chat", type=int, help="Chat ID for test message deletion")
+    
+    args = parser.parse_args()
+    
+    # Configure logging level
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Verbose logging enabled")
+    
     try:
         print("\n" + "="*60)
         print("🔧 SERVICE CLEANUP DIAGNOSTIC TOOL v2.0")
         print("="*60 + "\n")
         
         # Check environment variables
-        token = os.environ.get("BOT_TOKEN")
-        if not token:
+        token = args.token or os.environ.get("BOT_TOKEN")
+        if not token and args.interactive:
             logger.error("❌ BOT_TOKEN not found in environment variables")
             token = input("Please enter your bot token: ").strip()
             if not token:
                 logger.error("❌ No token provided. Exiting.")
                 return
+        elif not token:
+            logger.error("❌ No bot token provided. Use --token or set BOT_TOKEN environment variable.")
+            parser.print_help()
+            return
         
         # Get VIP_GROUP_IDS
-        group_ids = os.environ.get("VIP_GROUP_IDS", "")
-        if not group_ids:
+        group_ids = args.groups or os.environ.get("VIP_GROUP_IDS", "")
+        if not group_ids and args.interactive:
             logger.warning("⚠️ VIP_GROUP_IDS not found in environment variables")
             group_ids = input("Please enter group IDs (comma-separated): ").strip()
         
         group_id_list = [gid.strip() for gid in group_ids.split(",") if gid.strip()]
-        if not group_id_list:
-            logger.error("❌ No group IDs provided. Exiting.")
+        if not group_id_list and not args.check_db:
+            logger.error("❌ No group IDs provided. Use --groups or set VIP_GROUP_IDS environment variable.")
+            parser.print_help()
             return
+        
+        # 0. Check database health first
+        print("\n" + "-"*60)
+        print("📋 CHECKING DATABASE HEALTH")
+        print("-"*60)
+        db_health_ok = await check_database_health()
+        
+        if not db_health_ok:
+            logger.warning("⚠️ Database health issues detected - some diagnostics may be limited")
         
         # 1. Check service cleanup configuration
         print("\n" + "-"*60)
         print("📋 CHECKING SERVICE CLEANUP CONFIGURATION")
         print("-"*60)
         await check_service_cleanup_config()
+        
+        # Special case: if only database check was requested
+        if args.check_db and not args.interactive:
+            return
         
         # 2. Check bot permissions in groups
         print("\n" + "-"*60)
@@ -367,6 +474,13 @@ async def main():
             # Test with first group
             test_group = group_id_list[0]
             await perform_handler_test(token, test_group)
+            
+        # 5. Run test message deletion if requested
+        if args.test_message and args.test_chat:
+            print("\n" + "-"*60)
+            print(f"🧪 TESTING SPECIFIC MESSAGE DELETION: Message {args.test_message} in Chat {args.test_chat}")
+            print("-"*60)
+            await try_direct_message_delete(token, args.test_chat, args.test_message)
         
         # 5. Report findings and provide recommendations
         print("\n" + "-"*60)
