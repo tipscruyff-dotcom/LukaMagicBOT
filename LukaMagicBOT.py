@@ -2,6 +2,8 @@ import os
 import re
 import logging
 import asyncio
+import functools
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional, List
@@ -65,6 +67,25 @@ except ImportError as e:
 # ======================
 # 🔐 Config
 # ======================
+
+# Cache simples para otimizar admin dashboard
+_admin_cache = {}
+CACHE_TTL = 300  # 5 minutos
+
+def get_cached_or_compute(cache_key: str, compute_func, ttl: int = CACHE_TTL):
+    """Cache simples com TTL para otimizar queries do admin"""
+    now = time.time()
+    
+    if cache_key in _admin_cache:
+        cached_data, cached_time = _admin_cache[cache_key]
+        if now - cached_time < ttl:
+            return cached_data
+    
+    # Cache expirou ou não existe, calcular novamente
+    data = compute_func()
+    _admin_cache[cache_key] = (data, now)
+    return data
+
 TOKEN = os.getenv("BOT_TOKEN")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
@@ -2263,23 +2284,57 @@ async def admin_data_viewer(
     show_invites: int = 10,
     show_events: int = 10
 ):
-    """Página para visualizar dados do banco"""
+    """Página para visualizar dados do banco - VERSÃO OTIMIZADA"""
     _require_admin(request)
     
-    with SessionLocal() as db:
-        # Subscriptions with "Show More" approach
-        subs_total = db.query(models.Subscription).count()
-        subscriptions = db.query(models.Subscription).order_by(models.Subscription.created_at.desc()).limit(show_subs).all()
-        
-        # Invite logs with "Show More" approach  
-        invites_total = db.query(models.InviteLog).count()
-        invite_logs = db.query(models.InviteLog).order_by(models.InviteLog.created_at.desc()).limit(show_invites).all()
-        
-        # Stripe events with "Show More" approach
-        events_total = db.query(models.StripeEvent).count()
-        stripe_events = db.query(models.StripeEvent).order_by(models.StripeEvent.received_at.desc()).limit(show_events).all()
+    def compute_dashboard_data():
+        """Função para computar dados do dashboard (pode ser cacheada)"""
+        with SessionLocal() as db:
+            # Subscriptions with "Show More" approach - OTIMIZADO
+            subs_total = get_cached_or_compute(
+                "subs_total", 
+                lambda: db.query(models.Subscription).count(),
+                600  # Cache por 10 minutos
+            )
+            subscriptions = db.query(models.Subscription).order_by(models.Subscription.created_at.desc()).limit(show_subs).all()
+            
+            # Invite logs with "Show More" approach - OTIMIZADO
+            invites_total = get_cached_or_compute(
+                "invites_total",
+                lambda: db.query(models.InviteLog).count(),
+                600  # Cache por 10 minutos
+            )
+            invite_logs = db.query(models.InviteLog).order_by(models.InviteLog.created_at.desc()).limit(show_invites).all()
+            
+            # Stripe events with "Show More" approach - OTIMIZADO
+            events_total = get_cached_or_compute(
+                "events_total",
+                lambda: db.query(models.StripeEvent).count(),
+                600  # Cache por 10 minutos
+            )
+            stripe_events = db.query(models.StripeEvent).order_by(models.StripeEvent.received_at.desc()).limit(show_events).all()
+            
+            return {
+                'subs_total': subs_total,
+                'subscriptions': subscriptions,
+                'invites_total': invites_total,
+                'invite_logs': invite_logs,
+                'events_total': events_total,
+                'stripe_events': stripe_events
+            }
     
-    # Gerar HTML das tabelas
+    # Usar cache apenas para contadores, não para dados paginados
+    data = compute_dashboard_data()
+    
+    # Extrair dados
+    subs_total = data['subs_total']
+    subscriptions = data['subscriptions']
+    invites_total = data['invites_total']
+    invite_logs = data['invite_logs']
+    events_total = data['events_total']
+    stripe_events = data['stripe_events']
+    
+    # Gerar HTML das tabelas (otimizado)
     subs_html = ""
     for s in subscriptions:
         subs_html += f"""
@@ -2887,11 +2942,11 @@ async def admin_removal_dashboard(request: Request):
                 logger.warning(f"Could not initialize new tables: {e}")
         
         with SessionLocal() as db:
-            from crud import get_recent_removal_logs
+            from crud import get_recent_removal_logs_admin
             
-            # Buscar logs recentes (com fallback se tabela não existir)
+            # Buscar logs recentes (versão otimizada para admin com limite menor)
             try:
-                removal_logs = get_recent_removal_logs(db, 50)
+                removal_logs = get_recent_removal_logs_admin(db, 30)  # Reduzido de 50 para 30
             except Exception as e:
                 logger.warning(f"Could not fetch removal logs: {e}")
                 removal_logs = []
@@ -2902,22 +2957,22 @@ async def admin_removal_dashboard(request: Request):
             error_logs = len([log for log in removal_logs if log.status in ["failed", "error"]])
             whitelisted_logs = len([log for log in removal_logs if log.status == "whitelisted"])
             
-            # Buscar whitelist (com fallback se tabela não existir)
+            # Buscar whitelist (com limite para admin)
             try:
-                whitelist_entries = db.query(models.Whitelist).order_by(models.Whitelist.created_at.desc()).all()
+                whitelist_entries = db.query(models.Whitelist).order_by(models.Whitelist.created_at.desc()).limit(100).all()
             except Exception as e:
                 logger.warning(f"Could not fetch whitelist: {e}")
                 whitelist_entries = []
             
-            # Buscar usuários próximos da expulsão
+            # Buscar usuários próximos da expulsão (versões otimizadas para admin)
             try:
-                from crud import get_expired_subscriptions, get_subscriptions_past_grace_period, get_subscriptions_in_grace_period, is_whitelisted
+                from crud import get_subscriptions_past_grace_period_admin, get_subscriptions_in_grace_period_admin, is_whitelisted
                 
-                # Usuários já expirados (past grace period) - serão expulsos na próxima execução
-                expired_users = get_subscriptions_past_grace_period(db)
+                # Usuários já expirados (past grace period) - versão admin com limite
+                expired_users = get_subscriptions_past_grace_period_admin(db, limit=25)
                 
-                # Usuários no período de graça (expirados mas ainda dentro do grace period)
-                grace_users = get_subscriptions_in_grace_period(db)
+                # Usuários no período de graça - versão admin com limite
+                grace_users = get_subscriptions_in_grace_period_admin(db, limit=25)
                 
                 # Filtrar usuários não whitelistados
                 expired_to_remove = []
@@ -3001,17 +3056,21 @@ async def admin_removal_dashboard(request: Request):
                         <tbody>
             """
             
-            for user in expired_to_remove:
+            # Processar apenas os primeiros 15 para não sobrecarregar o HTML
+            display_expired = expired_to_remove[:15]
+            remaining_count = len(expired_to_remove) - len(display_expired)
+            
+            for user in display_expired:
                 days_expired = (now_tz().date() - user.expires_at.date()).days if user.expires_at else 0
                 upcoming_removals_html += f"""
                             <tr>
-                                <td style="padding: 8px; color: #fecaca;">{user.full_name or 'N/A'}</td>
-                                <td style="padding: 8px; color: #fecaca;">{user.email}</td>
+                                <td style="padding: 8px; color: #fecaca;">{html.escape(user.full_name or 'N/A')}</td>
+                                <td style="padding: 8px; color: #fecaca;">{html.escape(user.email)}</td>
                                 <td style="padding: 8px; color: #fecaca;">{user.telegram_user_id or 'N/A'}</td>
                                 <td style="padding: 8px; color: #fecaca;">{user.expires_at.strftime('%d/%m/%Y') if user.expires_at else 'N/A'}</td>
                                 <td style="padding: 8px; color: #ef4444; font-weight: bold;">{days_expired} dias</td>
                                 <td style="padding: 8px;">
-                                    <a href="/admin/subscriptions/{user.id}/expulsar" class="button" style="background: #dc2626; color: white; padding: 4px 8px; font-size: 12px;" onclick="return confirm('Expulsar {user.email} agora?')">Expulsar Agora</a>
+                                    <a href="/admin/subscriptions/{user.id}/expulsar" class="button" style="background: #dc2626; color: white; padding: 4px 8px; font-size: 12px;" onclick="return confirm('Expulsar {html.escape(user.email)} agora?')">Expulsar Agora</a>
                                 </td>
                             </tr>
                 """
@@ -3020,8 +3079,16 @@ async def admin_removal_dashboard(request: Request):
                         </tbody>
                     </table>
                 </div>
-            </div>
             """
+            
+            if remaining_count > 0:
+                upcoming_removals_html += f"""
+                <p style="color: #f87171; margin-top: 10px; font-style: italic;">
+                    + {remaining_count} usuários adicionais não mostrados (para melhor performance)
+                </p>
+                """
+            
+            upcoming_removals_html += "</div>"
         
         # Usuários no período de graça
         if grace_period_users:
@@ -3046,14 +3113,18 @@ async def admin_removal_dashboard(request: Request):
             
             grace_period_days = int(os.getenv('GRACE_PERIOD_DAYS', '3'))
             
-            for user in grace_period_users:
+            # Processar apenas os primeiros 15 para não sobrecarregar o HTML
+            display_grace = grace_period_users[:15]
+            remaining_grace_count = len(grace_period_users) - len(display_grace)
+            
+            for user in display_grace:
                 days_expired = (now_tz().date() - user.expires_at.date()).days if user.expires_at else 0
                 days_remaining = grace_period_days - days_expired
                 
                 upcoming_removals_html += f"""
                             <tr>
-                                <td style="padding: 8px; color: #fcd34d;">{user.full_name or 'N/A'}</td>
-                                <td style="padding: 8px; color: #fcd34d;">{user.email}</td>
+                                <td style="padding: 8px; color: #fcd34d;">{html.escape(user.full_name or 'N/A')}</td>
+                                <td style="padding: 8px; color: #fcd34d;">{html.escape(user.email)}</td>
                                 <td style="padding: 8px; color: #fcd34d;">{user.telegram_user_id or 'N/A'}</td>
                                 <td style="padding: 8px; color: #fcd34d;">{user.expires_at.strftime('%d/%m/%Y') if user.expires_at else 'N/A'}</td>
                                 <td style="padding: 8px; color: #f59e0b; font-weight: bold;">{days_remaining} dias</td>
@@ -3065,8 +3136,16 @@ async def admin_removal_dashboard(request: Request):
                         </tbody>
                     </table>
                 </div>
-            </div>
             """
+            
+            if remaining_grace_count > 0:
+                upcoming_removals_html += f"""
+                <p style="color: #fbbf24; margin-top: 10px; font-style: italic;">
+                    + {remaining_grace_count} usuários adicionais no período de graça não mostrados
+                </p>
+                """
+            
+            upcoming_removals_html += "</div>"
     else:
         upcoming_removals_html = """
         <div class="alert-success" style="padding: 15px; border-radius: 8px; border-left: 4px solid #10b981;">

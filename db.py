@@ -5,13 +5,33 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./lukabot.db")
 connect_args = {}
-if DATABASE_URL.startswith("sqlite:///"):
+
+# Otimização específica para PostgreSQL no Railway
+if DATABASE_URL.startswith(("postgresql://", "postgres://")):
+    # Pool otimizado para Railway PostgreSQL
+    engine = create_engine(
+        DATABASE_URL, 
+        future=True, 
+        pool_pre_ping=True,
+        pool_size=3,          # Conexões ativas (Railway tem limite baixo)
+        max_overflow=7,       # Conexões extras (total máximo: 10)
+        pool_timeout=20,      # Timeout para obter conexão
+        pool_recycle=1800,    # Recicla conexões a cada 30min
+        connect_args={
+            "connect_timeout": 10,
+            "application_name": "LukaMagicBOT"
+        }
+    )
+elif DATABASE_URL.startswith("sqlite:///"):
+    # Configuração para SQLite local (desenvolvimento)
     sqlite_path = DATABASE_URL.replace("sqlite:///", "")
     abs_path = str(pathlib.Path(sqlite_path).resolve())
     DATABASE_URL = f"sqlite:///{abs_path}"
     connect_args = {"check_same_thread": False}
-
-engine = create_engine(DATABASE_URL, future=True, pool_pre_ping=True, connect_args=connect_args)
+    engine = create_engine(DATABASE_URL, future=True, pool_pre_ping=True, connect_args=connect_args)
+else:
+    # Fallback para outros tipos de banco
+    engine = create_engine(DATABASE_URL, future=True, pool_pre_ping=True, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
 Base = declarative_base()
 

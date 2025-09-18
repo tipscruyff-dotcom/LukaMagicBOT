@@ -598,6 +598,20 @@ def get_recent_removal_logs(db: Session, limit: int = 100):
             .all()
         )
     except Exception as e:
+        logger.warning(f"Could not fetch removal logs: {e}")
+        return []
+
+
+def get_recent_removal_logs_admin(db: Session, limit: int = 30):
+    """Versão otimizada para admin - busca apenas os logs mais recentes"""
+    try:
+        return (
+            db.query(models.RemovalLog)
+            .order_by(models.RemovalLog.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+    except Exception as e:
         # Table doesn't exist yet - return empty list
         logger.warning(f"RemovalLog table doesn't exist yet: {e}")
         return []
@@ -925,6 +939,27 @@ def get_subscriptions_in_grace_period(db: Session, grace_period_days: int = 3):
     )
 
 
+def get_subscriptions_in_grace_period_admin(db: Session, grace_period_days: int = 3, limit: int = 50):
+    """Versão otimizada para admin - APENAS para visualização com limite"""
+    from datetime import datetime, timedelta
+    
+    now = datetime.utcnow()
+    grace_cutoff = now - timedelta(days=grace_period_days)
+    
+    return (
+        db.query(models.Subscription)
+        .filter(
+            models.Subscription.status == "active",
+            models.Subscription.expires_at < now,  # Expirada
+            models.Subscription.expires_at >= grace_cutoff,  # Mas ainda no grace period
+            models.Subscription.telegram_user_id.isnot(None)
+        )
+        .order_by(models.Subscription.expires_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
 def get_subscriptions_past_grace_period(db: Session, grace_period_days: int = 3):
     """Buscar assinaturas que passaram do grace period (devem ser removidas)"""
     from datetime import datetime, timedelta
@@ -939,6 +974,26 @@ def get_subscriptions_past_grace_period(db: Session, grace_period_days: int = 3)
             models.Subscription.expires_at < grace_cutoff,  # Expirada há mais de X dias
             models.Subscription.telegram_user_id.isnot(None)
         )
+        .all()
+    )
+
+
+def get_subscriptions_past_grace_period_admin(db: Session, grace_period_days: int = 3, limit: int = 50):
+    """Versão otimizada para admin - APENAS para visualização com limite"""
+    from datetime import datetime, timedelta
+    
+    now = datetime.utcnow()
+    grace_cutoff = now - timedelta(days=grace_period_days)
+    
+    return (
+        db.query(models.Subscription)
+        .filter(
+            models.Subscription.status == "active",
+            models.Subscription.expires_at < grace_cutoff,  # Expirada há mais de X dias
+            models.Subscription.telegram_user_id.isnot(None)
+        )
+        .order_by(models.Subscription.expires_at.desc())
+        .limit(limit)
         .all()
     )
 
