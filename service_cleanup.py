@@ -133,12 +133,20 @@ async def _try_delete_message(context: ContextTypes.DEFAULT_TYPE, update: Update
     msg = update.effective_message
     chat = update.effective_chat
     if not msg:
+        logger.warning("service_cleanup event=%s action=skip_no_message chat_id=%s", event_type, chat.id if chat else "unknown")
         return False
 
-    # Optional: minimal permission check via chat member status
+    # Log message details for debugging
+    logger.info(
+        "service_cleanup event=%s attempting to delete message_id=%s in chat=%s",
+        event_type, msg.message_id, chat.id
+    )
+
+    # Enhanced permission check with detailed logging
     try:
         bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
         status = getattr(bot_member, "status", None)
+        
         # In PTB v21, status is ChatMemberStatus enum (ADMINISTRATOR/OWNER/MEMBER/...)
         if status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
             logger.warning(
@@ -148,17 +156,27 @@ async def _try_delete_message(context: ContextTypes.DEFAULT_TYPE, update: Update
                 status,
             )
             return False
+            
         # If available, check can_delete_messages
-        if hasattr(bot_member, "can_delete_messages") and not getattr(bot_member, "can_delete_messages", False):
+        can_delete = getattr(bot_member, "can_delete_messages", False)
+        if hasattr(bot_member, "can_delete_messages") and not can_delete:
             logger.warning(
                 "service_cleanup event=%s action=skip_no_perm chat_id=%s ok=false reason=no_delete_perm",
                 event_type,
                 chat.id,
             )
             return False
+            
+        logger.info(
+            "service_cleanup permission check passed: status=%s can_delete=%s", 
+            status, can_delete
+        )
+            
     except Exception as e:
-        logger.debug("service_cleanup permission check failed: %s", e)
+        logger.warning("service_cleanup permission check failed for chat_id=%s: %s", chat.id, e)
+        return False
 
+    # Attempt to delete with better error handling
     try:
         await context.bot.delete_message(chat_id=chat.id, message_id=msg.message_id)
         logger.info(
@@ -169,9 +187,22 @@ async def _try_delete_message(context: ContextTypes.DEFAULT_TYPE, update: Update
         )
         return True
     except Exception as e:
-        logger.warning(
-            "service_cleanup event=%s action=delete ok=false error=%s", event_type, e
-        )
+        error_msg = str(e).lower()
+        if "message to delete not found" in error_msg:
+            logger.warning(
+                "service_cleanup event=%s action=delete chat_id=%s message_id=%s ok=false reason=message_not_found",
+                event_type, chat.id, msg.message_id
+            )
+        elif "not enough rights" in error_msg or "forbidden" in error_msg:
+            logger.warning(
+                "service_cleanup event=%s action=delete chat_id=%s message_id=%s ok=false reason=permission_denied",
+                event_type, chat.id, msg.message_id
+            )
+        else:
+            logger.warning(
+                "service_cleanup event=%s action=delete chat_id=%s message_id=%s ok=false error=%s",
+                event_type, chat.id, msg.message_id, e
+            )
         return False
 
 
@@ -179,49 +210,75 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Lightweight handler that observes join/leave service updates.
     It never stops propagation and only acts when feature flag is enabled.
     """
+    # Debug log para identificar que o handler foi acionado
+    logger.debug("service_cleanup handler triggered, checking configuration")
+    
     # Read config quickly per-update (short DB session); could be cached later
-    with SessionLocal() as db:
-        cfg = get_service_cleanup_config(db)
-
-    if not cfg.get("enabled", False):
-        # disabled; do nothing
-        return
-
     try:
+        with SessionLocal() as db:
+            cfg = get_service_cleanup_config(db)
+            
+        logger.debug("service_cleanup config: %s", cfg)
+
+        if not cfg.get("enabled", False):
+            # disabled; do nothing
+            logger.debug("service_cleanup disabled in config, ignoring update")
+            return
+
         is_join = _is_join_message(update)
         is_leave = _is_leave_message(update)
+        
         if not (is_join or is_leave):
+            logger.debug("Not a join/leave message, ignoring update")
             return
 
         event_type = "join" if is_join else "leave"
+        logger.info("service_cleanup detected %s event", event_type)
 
         # Record seen service message for potential retro cleanup
         try:
             msg = update.effective_message
             chat = update.effective_chat
             if msg and chat:
+                logger.debug("Recording service message: chat_id=%s message_id=%s", chat.id, msg.message_id)
                 with SessionLocal() as db:
                     record_service_message_seen(db, chat_id=chat.id, message_id=msg.message_id, event_type=event_type)
-        except Exception:
-            pass
+                    logger.debug("Service message recorded successfully")
+        except Exception as e:
+            logger.warning("Failed to record service message: %s", e)
 
         # Schedule deletion ASAP to minimize message visibility
         should_delete = (is_join and cfg.get("remove_on_join", True)) or (
             is_leave and cfg.get("remove_on_leave", True)
         )
+        
         if should_delete and update.effective_message is not None:
+            logger.info("Attempting to delete %s message", event_type)
             try:
-                asyncio.create_task(_try_delete_message(context, update, event_type))
-            except Exception:
-                # Fallback: if scheduling fails, do it synchronously
-                await _try_delete_message(context, update, event_type)
+                # Mudança importante: esperar a conclusão da exclusão em vez de criar uma tarefa
+                # Isso garante que a operação seja concluída antes de prosseguir
+                deletion_result = await _try_delete_message(context, update, event_type)
+                logger.info("Message deletion result: %s", "success" if deletion_result else "failed")
+            except Exception as e:
+                logger.error("Error when attempting to delete message: %s", e)
+                # Fallback: se falhar com exceção, tente novamente (pode ser um problema temporário)
+                try:
+                    deletion_result = await _try_delete_message(context, update, event_type)
+                    logger.info("Fallback deletion result: %s", "success" if deletion_result else "failed")
+                except Exception as e2:
+                    logger.error("Fallback deletion also failed: %s", e2)
 
         # Forward/copy or send summary (may fail if message already deleted; we'll fallback)
-        await _send_forward_or_summary(
-            context,
-            forward_target_id=cfg.get("forward_target_id"),
-            update=update,
-            event_type=event_type,
-        )
+        try:
+            forward_result = await _send_forward_or_summary(
+                context,
+                forward_target_id=cfg.get("forward_target_id"),
+                update=update,
+                event_type=event_type,
+            )
+            logger.info("Forward/summary result: %s", "success" if forward_result else "failed")
+        except Exception as e:
+            logger.error("Error forwarding message: %s", e)
+            
     except Exception as e:
-        logger.warning("service_cleanup action=error error=%s", e)
+        logger.error("service_cleanup handler failed: %s", e, exc_info=True)

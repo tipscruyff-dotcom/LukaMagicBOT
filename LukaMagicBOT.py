@@ -498,6 +498,8 @@ async def create_one_time_invite_link(bot, user_id: int, ttl_seconds: int = 3600
 
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data if update.callback_query else None
+    logger.info(f"Button clicked: {data}")
+    
     if data == "plans.open":
         await open_plans(update, context)
         return
@@ -523,14 +525,27 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [[InlineKeyboardButton("⬅️ Back", callback_data="home.back")]])
         )
         return
-    # fallback
+    # fallback - processo qualquer outro padrão de callback
     try:
+        logger.info(f"Processing unhandled callback: {data}")
         await update.callback_query.answer()
     except Exception as e:
         logger.warning("CallbackQuery answer failed: %s", e)
-    await update.callback_query.edit_message_text(
-        text="✅ You clicked: {}".format(data)
-    )
+    
+    # Para evitar erro se o botão veio de uma mensagem antiga
+    try:
+        await update.callback_query.edit_message_text(
+            text=f"✅ Action received: {data}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Back", callback_data="home.back")]])
+        )
+    except Exception as e:
+        logger.warning(f"Failed to edit message for callback: {e}")
+        # Responde apenas com popup
+        try:
+            await update.callback_query.answer("This button is no longer available.")
+        except Exception:
+            pass
 
 # ======================
 # FastAPI Setup
@@ -592,6 +607,7 @@ async def lifespan(app: FastAPI):
                 "edited_message",
                 "channel_post",
                 "edited_channel_post",
+                "callback_query",
                 "chat_member",
                 "my_chat_member",
                 "chat_join_request",
@@ -1520,13 +1536,21 @@ def setup_handlers(app: Application):
     )
     app.add_handler(conv)
 
-    # CallbackQueryHandler global para outros botões (exceto unlock.access e home.back no contexto da conversa)
+    # CallbackQueryHandler global para todos os botões 
+    # A ConversationHandler já lida com unlock.access e home.back em seu contexto
+    # Para outros patterns, usamos um handler mais permissivo
+    
+    # Handler específico para plans.open, howitworks, e myid.show
     app.add_handler(CallbackQueryHandler(
         button_router, pattern=r"^(plans\.open|howitworks|myid\.show)$"))
     
     # Handler separado para home.back fora do contexto da conversa
     app.add_handler(CallbackQueryHandler(
         back_to_home, pattern=r"^home\.back$"))
+    
+    # Handler catch-all para outros botões não específicos
+    # Isso garante que qualquer botão não tratado nos padrões acima será processado
+    app.add_handler(CallbackQueryHandler(button_router))
 # ======================
 # Main
 # ======================
