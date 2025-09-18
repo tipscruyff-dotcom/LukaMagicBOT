@@ -268,13 +268,13 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
     email = (update.effective_message.text or "").strip().lower()
     if not EMAIL_REGEX.match(email):
         await update.effective_message.reply_text(
-            "Isso nao parece um email valido. Tente novamente, por favor."
+            "That doesn't look like a valid email. Please try again."
         )
         return ASK_EMAIL
 
     if not DATABASE_AVAILABLE:
         await update.effective_message.reply_text(
-            f"Obrigado! Recebemos **{email}**. A integracao com o banco ainda esta sendo configurada.",
+            f"Thanks! We received **{email}**. Database integration is still being configured.",
             parse_mode="Markdown"
         )
         return ConversationHandler.END
@@ -288,10 +288,10 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
                 user_id_int = update.effective_user.id
                 stored_id = (subscription.telegram_user_id or "").strip() if getattr(subscription, "telegram_user_id", None) else ""
                 if stored_id and stored_id != user_id_str:
-                    logger.warning("Telegram ID %s tentou usar email %s ja vinculado a %s",
+                    logger.warning("Telegram ID %s tried to use email %s that is already linked to %s",
                                    user_id_str, email, stored_id)
                     await update.effective_message.reply_text(
-                        "ATENCAO: este e-mail ja esta vinculado a outro Telegram. Use o mesmo Telegram da compra ou contate o suporte: @Sthefano_p"
+                        "ATTENTION: This email is already linked to another Telegram account. Use the same Telegram you used for your purchase or contact support: @Sthefano_p"
                     )
                     return ConversationHandler.END
 
@@ -300,7 +300,7 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
                 logger.info("Result of mark_telegram_id: %s", success)
                 if not success:
                     await update.effective_message.reply_text(
-                        "Nao foi possivel associar seu Telegram a esta assinatura. Tente novamente ou contate o suporte: @Sthefano_p"
+                        "We could not link your Telegram to this subscription. Try again or contact support: @Sthefano_p"
                     )
                     return ConversationHandler.END
 
@@ -340,21 +340,21 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
                 membership_notes: List[str] = []
                 if VIP_GROUP_IDS:
                     if membership_present:
-                        membership_notes.append("- Ja esta nos grupos: " + ", ".join(str(g) for g in membership_present))
+                        membership_notes.append("- Already in groups: " + ", ".join(str(g) for g in membership_present))
                     if membership_missing is not None:
                         if membership_missing:
-                            membership_notes.append("- Ainda falta entrar nos grupos: " + ", ".join(str(g) for g in membership_missing))
+                            membership_notes.append("- Still missing groups: " + ", ".join(str(g) for g in membership_missing))
                         else:
-                            membership_notes.append("- Voce ja esta em todos os grupos VIP.")
+                            membership_notes.append("- You are already in every VIP group.")
                     if membership_errors:
-                        membership_notes.append("- Nao foi possivel confirmar alguns grupos, enviaremos links por seguranca.")
+                        membership_notes.append("- Could not confirm some groups; sending links just in case.")
 
                 subscription_info = (
-                    "**Assinatura encontrada!**\n\n"
+                    "**Subscription found!**\n\n"
                     f"- Email: {subscription.email}\n"
-                    f"- Plano: {plan_label}\n"
+                    f"- Plan: {plan_label}\n"
                     f"- Status: {status_label}\n"
-                    f"- Expira em: {expires_label}"
+                    f"- Expires on: {expires_label}"
                 )
                 if membership_notes:
                     subscription_info += "\n" + "\n".join(membership_notes)
@@ -386,7 +386,7 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
 
 
                 if should_generate_links:
-                    subscription_info += "\n\nGerando seu link de acesso..."
+                    subscription_info += "\n\nGenerating your access link..."
 
                 await update.effective_message.reply_text(
                     subscription_info,
@@ -395,7 +395,7 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
 
                 if membership_missing is not None and not should_generate_links:
                     await update.effective_message.reply_text(
-                        "Voce ja possui acesso a todos os grupos VIP configurados. Nenhum link novo foi necessario."
+                        "You already have access to every configured VIP group. No new link was needed."
                     )
                     return ConversationHandler.END
 
@@ -405,7 +405,7 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
                 await asyncio.sleep(1.5)
 
                 try:
-                    logger.info(f"Gerando invite link para usuario {user_id_str}")
+                    logger.info(f"Generating invite link for user {user_id_str}")
                     cooldown_seconds = int(os.getenv("INVITE_COOLDOWN_SECONDS", "180"))
                     recent_email = get_recent_invite_for_email(db, email, cooldown_seconds)
                     recent_user = get_recent_invite_for_user(db, user_id_str, cooldown_seconds)
@@ -415,7 +415,7 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
                         elapsed = (now - recent.created_at).total_seconds()
                         remaining = max(0, int(cooldown_seconds - elapsed))
                         await update.effective_message.reply_text(
-                            f"Aguarde {remaining} segundos antes de solicitar um novo link de convite.")
+                            f"Please wait {remaining} seconds before requesting a new invite link.")
                         return ConversationHandler.END
 
                     result = await create_one_time_invite_link(
@@ -437,31 +437,31 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
                         is_temporary=is_temporary,
                     )
 
-                    link_type = "temporario (1 uso)" if is_temporary else "estatico"
+                    link_type = "temporary (1 use)" if is_temporary else "static"
 
                     served_groups = result.success_groups or (pending_groups or [])
-                    grupos_texto = ""
+                    groups_text = ""
                     if served_groups:
-                        grupos_texto = "\n- Grupos atendidos: " + ", ".join(str(g) for g in served_groups)
+                        groups_text = "\n- Groups covered: " + ", ".join(str(g) for g in served_groups)
 
                     failed_text = ""
                     if result.failed_groups:
                         failed_ids = ", ".join(str(g) for g in result.failed_groups.keys())
-                        failed_text = "\n- Falha ao gerar link para: " + failed_ids
+                        failed_text = "\n- Failed to create link for: " + failed_ids
                     if result.used_fallback:
-                        failed_text += "\n- Utilizando link de fallback (contate o suporte se persistir)."
+                        failed_text += "\n- Using fallback link (contact support if this keeps happening)."
 
                     links_text = "\n".join(f"- {link}" for link in result.links)
-                    detalhes_texto = f"{grupos_texto}{failed_text}"
+                    details_text = f"{groups_text}{failed_text}"
 
                     message = (
-                        "**Acesso liberado!**\n\n"
-                        f"Links {link_type}:\n{links_text}\n\n"
-                        "**Importante:**\n"
-                        f"- {'Esses links expiram em 1 hora' if is_temporary else 'Links permanentes'}\n"
-                        f"- {'Validos para uma pessoa' if is_temporary else 'Podem ser usados varias vezes'}"
-                        f"{detalhes_texto}\n"
-                        "\nBem-vindo ao VIP!"
+                        "**Access granted!**\n\n"
+                        f"Links ({link_type}):\n{links_text}\n\n"
+                        "**Important:**\n"
+                        f"- {'These links expire in 1 hour' if is_temporary else 'Permanent links'}\n"
+                        f"- {'Valid for one person only' if is_temporary else 'Can be used multiple times'}"
+                        f"{details_text}\n"
+                        "\nWelcome to VIP!"
                     )
 
                     await update.effective_message.reply_text(
@@ -478,9 +478,9 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
                         list(result.failed_groups.keys()),
                     )
                 except Exception as e:
-                    logger.error("Erro ao gerar link de convite: %s", e, exc_info=True)
+                    logger.error("Error generating invite link: %s", e, exc_info=True)
                     await update.effective_message.reply_text(
-                        "Erro ao gerar o link de acesso. Fale com o suporte: @Sthefano_p"
+                        "Error generating the access link. Please contact support: @Sthefano_p"
                     )
             else:
                 any_sub = None
@@ -4802,5 +4802,7 @@ async def admin_clear_removal_logs(request: Request):
         """
         
         return HTMLResponse(_html_page("Erro na Limpeza", body))
+
+
 
 
