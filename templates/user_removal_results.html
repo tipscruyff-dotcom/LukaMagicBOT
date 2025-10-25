@@ -1,0 +1,25 @@
+<h1>🚫 User Removal Results</h1>
+
+<div class="alert-info" style="padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+    <h2>👤 User Information</h2>
+    <p><strong>Email:</strong> {{ email }}</p>
+    <p><strong>Telegram ID:</strong> {{ telegram_user_id }}</p>
+    <p><strong>Previous Status:</strong> {{ previous_status }}</p>
+</div>
+
+<div class="{{ 'alert-success' if success_count > 0 else 'alert-error' }}" style="padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+    <h2>📊 Removal Summary</h2>
+    <p><strong>✅ Successfully removed from:</strong> {{ success_count }} groups</p>
+    <p><strong>❌ Failed to remove from:</strong> {{ error_count }} groups</p>
+    <p><strong>📱 DM sent:</strong> {{ '✅ Yes' if dm_sent else '❌ No' }}</p>
+</div>
+
+<h2>📋 Detailed Log</h2>
+<div class="alert-info" style="padding: 15px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.4;">
+    {{ details_html }}
+</div>
+
+<div style="margin-top: 20px;" class="nav-buttons">
+    <a href="/admin/subscriptions" class="button">← Back to Admin</a>
+    <a href="/admin/removal" class="button">📊 Auto Removal Dashboard</a>
+</div>
