@@ -106,7 +106,10 @@ async def process_stripe_webhook_event(db: Session, event: dict) -> bool:
             except Exception as e:
                 logger.warning("Failed to log processed event %s: %s", event_id, e)
             return True
-        elif event_type in ("invoice.paid", "invoice.payment_succeeded"):
+        elif event_type == "invoice.paid":
+            # IMPORTANTE: Processar APENAS invoice.paid para evitar duplicação
+            # Stripe envia tanto "invoice.paid" quanto "invoice.payment_succeeded"
+            # para o mesmo pagamento, o que causava duplicação do período
             invoice = event["data"]["object"]
             try:
                 from crud import upsert_subscription_from_invoice
@@ -118,6 +121,16 @@ async def process_stripe_webhook_event(db: Session, event: dict) -> bool:
             # idempotency: record as processed to avoid extending twice if both events arrive
             try:
                 log_event(db, event_id)
+            except Exception as e:
+                logger.warning("Failed to log processed event %s: %s", event_id, e)
+            return True
+        elif event_type == "invoice.payment_succeeded":
+            # IMPORTANTE: Ignorar este evento para evitar duplicação de período
+            # O evento "invoice.paid" já processa o pagamento e adiciona o tempo
+            # Este evento é redundante e causava o bug de dobrar o período (1 mês → 2 meses)
+            logger.info(f"Skipping invoice.payment_succeeded (already processed via invoice.paid): {event_id}")
+            try:
+                log_event(db, event_id)  # Marcar como processado para não reprocessar
             except Exception as e:
                 logger.warning("Failed to log processed event %s: %s", event_id, e)
             return True
