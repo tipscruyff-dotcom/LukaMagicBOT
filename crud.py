@@ -209,15 +209,15 @@ def upsert_subscription_from_checkout_session(db, session: dict) -> bool:
                 full_name=full_name,
                 telegram_user_id=telegram_id or None,
                 stripe_subscription_id=sub_id or None,
-                plan_type=plan_type_hint,
+                plan_type=plan_type_hint or "pending",  # Fallback to "pending" if not available
                 status="active" if is_paid else "pending",
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
             )
             db.add(sub)
             db.commit()
-            logger.info("Created subscription (checkout.completed): email=%s status=%s tg=%s sub=%s",
-                        email, sub.status, telegram_id, sub_id)
+            logger.info("Created subscription (checkout.completed): email=%s status=%s tg=%s sub=%s plan=%s",
+                        email, sub.status, telegram_id, sub_id, sub.plan_type)
         else:
             changed = False
             if full_name and not getattr(sub, "full_name", None):
@@ -317,7 +317,7 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
                 full_name=customer_name or None,
                 telegram_user_id=telegram_meta or None,
                 stripe_subscription_id=sub_id or None,
-                plan_type=plan_type,
+                plan_type=plan_type or "unknown",  # Fallback to "unknown" if not detected
                 status="active",
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
@@ -328,9 +328,13 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
                 sub.expires_at = datetime.utcnow() + timedelta(days=90)
             elif plan_type == "annual":
                 sub.expires_at = datetime.utcnow() + timedelta(days=365)
+            else:
+                # Default to 30 days if plan not recognized
+                sub.expires_at = datetime.utcnow() + timedelta(days=30)
+                logger.warning("Unknown plan_type '%s' for %s, defaulting to 30 days", plan_type, email)
             db.add(sub)
             db.commit()
-            logger.info("Created subscription (invoice.paid): email=%s plan=%s sub=%s", email, plan_type, sub_id)
+            logger.info("Created subscription (invoice.paid): email=%s plan=%s sub=%s", email, plan_type or "unknown", sub_id)
         else:
             changed = False
             if sub_id and not getattr(sub, "stripe_subscription_id", None):
@@ -339,7 +343,8 @@ def upsert_subscription_from_invoice(db, invoice: dict) -> bool:
             if sub.status != "active":
                 sub.status = "active"
                 changed = True
-            if plan_type and sub.plan_type != plan_type:
+            # Update plan_type if available and different (including replacing "pending" or "unknown")
+            if plan_type and (sub.plan_type != plan_type or sub.plan_type in ("pending", "unknown")):
                 sub.plan_type = plan_type
                 changed = True
             if customer_name and not getattr(sub, "full_name", None):
