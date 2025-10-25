@@ -4858,5 +4858,326 @@ async def admin_clear_removal_logs(request: Request):
         return HTMLResponse(_html_page("Erro na Limpeza", body))
 
 
+@app.get("/admin/stripe/utils", response_class=HTMLResponse)
+async def admin_stripe_utils(request: Request):
+    """Utilidades para gerenciar eventos do Stripe"""
+    _require_admin(request)
+    
+    with SessionLocal() as db:
+        # Contar eventos processados
+        total_events = db.query(models.StripeEvent).count()
+        recent_events = db.query(models.StripeEvent).order_by(
+            models.StripeEvent.received_at.desc()
+        ).limit(10).all()
+    
+    recent_html = ""
+    for evt in recent_events:
+        recent_html += f"""
+        <tr>
+            <td style="font-family: monospace; font-size: 11px;">{evt.event_id}</td>
+            <td>{evt.received_at.strftime('%Y-%m-%d %H:%M:%S')}</td>
+            <td>
+                <form method="POST" action="/admin/stripe/clear-event" style="display:inline;">
+                    <input type="hidden" name="event_id" value="{evt.event_id}">
+                    <button type="submit" class="button" style="padding: 5px 10px; font-size: 12px;">
+                        🗑️ Limpar
+                    </button>
+                </form>
+            </td>
+        </tr>
+        """
+    
+    body = f"""
+    <h1>🔧 Utilidades Stripe</h1>
+    
+    <div class="alert-info">
+        <h3>📊 Eventos Processados</h3>
+        <p><strong>Total:</strong> {total_events} eventos registrados</p>
+        <p>Eventos marcados como processados não são reprocessados automaticamente.</p>
+    </div>
+    
+    <h2>🔨 Ações Disponíveis</h2>
+    
+    <div style="margin: 20px 0;">
+        <h3>🔄 Forçar Reprocessamento de Assinatura</h3>
+        <p>Use quando uma assinatura ficou com plan_type="pending" ou sem expires_at.</p>
+        <form method="POST" action="/admin/stripe/force-update" style="max-width: 600px;">
+            <label>
+                Email da Assinatura:
+                <input type="email" name="email" required placeholder="user@example.com">
+            </label>
+            <label style="margin-top: 10px;">
+                Plan Type (opcional - será detectado automaticamente):
+                <select name="plan_type">
+                    <option value="">Auto-detectar do Stripe</option>
+                    <option value="monthly">Monthly (30 dias)</option>
+                    <option value="quarterly">Quarterly (90 dias)</option>
+                    <option value="annual">Annual (365 dias)</option>
+                </select>
+            </label>
+            <button type="submit" style="margin-top: 15px;">
+                ✅ Atualizar Assinatura
+            </button>
+        </form>
+    </div>
+    
+    <div style="margin: 30px 0;">
+        <h3>🗑️ Limpar Evento Específico</h3>
+        <p>Remove um evento da tabela para permitir reprocessamento via webhook.</p>
+        <form method="POST" action="/admin/stripe/clear-event" style="max-width: 600px;">
+            <label>
+                Event ID:
+                <input type="text" name="event_id" required placeholder="evt_xxxxxxxxxxxxx">
+            </label>
+            <button type="submit" class="danger" style="margin-top: 15px;">
+                🗑️ Remover Evento
+            </button>
+        </form>
+    </div>
+    
+    <h2>📋 Eventos Recentes (últimos 10)</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Event ID</th>
+                <th>Recebido em</th>
+                <th>Ações</th>
+            </tr>
+        </thead>
+        <tbody>
+            {recent_html if recent_html else '<tr><td colspan="3">Nenhum evento registrado ainda</td></tr>'}
+        </tbody>
+    </table>
+    
+    <div style="margin-top: 30px;">
+        <a href="/admin/subscriptions" class="button">← Voltar para Assinaturas</a>
+        <a href="/admin/data" class="button">📊 Data Viewer</a>
+    </div>
+    """
+    
+    return HTMLResponse(_html_page("Utilidades Stripe", body))
+
+
+@app.post("/admin/stripe/clear-event")
+async def admin_clear_stripe_event(request: Request, event_id: str = Form(...)):
+    """Limpar evento específico do banco"""
+    _require_admin(request)
+    
+    try:
+        with SessionLocal() as db:
+            # Verificar se evento existe
+            event = db.query(models.StripeEvent).filter_by(event_id=event_id).first()
+            
+            if not event:
+                body = f"""
+                <div style="text-align: center; margin-top: 50px;">
+                    <h1>⚠️ Evento Não Encontrado</h1>
+                    <div class="alert-warning">
+                        <p>O evento <code>{event_id}</code> não está registrado no banco de dados.</p>
+                        <p>Ele pode nunca ter sido processado ou já foi removido.</p>
+                    </div>
+                    <div style="margin-top: 30px;">
+                        <a href="/admin/stripe/utils" class="button">← Voltar</a>
+                    </div>
+                </div>
+                """
+                return HTMLResponse(_html_page("Evento Não Encontrado", body))
+            
+            # Remover evento
+            db.delete(event)
+            db.commit()
+            
+            logger.info(f"🗑️ Admin cleared Stripe event: {event_id}")
+            
+            body = f"""
+            <div style="text-align: center; margin-top: 50px;">
+                <h1>✅ Evento Removido</h1>
+                <div class="alert-success">
+                    <h3>Evento limpo com sucesso!</h3>
+                    <p><strong>Event ID:</strong> <code>{event_id}</code></p>
+                    <p>Agora você pode reenviar este evento no Stripe Dashboard para reprocessamento.</p>
+                </div>
+                
+                <div class="alert-info" style="margin-top: 20px;">
+                    <h4>📝 Próximos Passos:</h4>
+                    <ol style="text-align: left; display: inline-block;">
+                        <li>Vá no Stripe Dashboard → Developers → Webhooks</li>
+                        <li>Encontre o evento <code>{event_id}</code></li>
+                        <li>Clique em "Retry" ou "Resend"</li>
+                        <li>Aguarde alguns segundos</li>
+                        <li>Verifique a assinatura atualizada em /admin/subscriptions</li>
+                    </ol>
+                </div>
+                
+                <div style="margin-top: 30px;">
+                    <a href="/admin/stripe/utils" class="button">← Voltar para Utilidades</a>
+                    <a href="/admin/subscriptions" class="button">📋 Ver Assinaturas</a>
+                </div>
+            </div>
+            """
+            
+            return HTMLResponse(_html_page("Evento Removido", body))
+            
+    except Exception as e:
+        logger.error(f"Error clearing event {event_id}: {e}")
+        
+        body = f"""
+        <div style="text-align: center; margin-top: 50px;">
+            <h1>❌ Erro ao Remover Evento</h1>
+            <div class="alert-error">
+                <p><strong>Erro:</strong> {str(e)}</p>
+            </div>
+            <div style="margin-top: 30px;">
+                <a href="/admin/stripe/utils" class="button">← Voltar</a>
+            </div>
+        </div>
+        """
+        
+        return HTMLResponse(_html_page("Erro", body))
+
+
+@app.post("/admin/stripe/force-update")
+async def admin_force_update_subscription(
+    request: Request, 
+    email: str = Form(...),
+    plan_type: str = Form("")
+):
+    """Forçar atualização de assinatura com dados do Stripe"""
+    _require_admin(request)
+    
+    try:
+        with SessionLocal() as db:
+            # Buscar assinatura
+            sub = db.query(models.Subscription).filter_by(email=email.lower().strip()).first()
+            
+            if not sub:
+                body = f"""
+                <div style="text-align: center; margin-top: 50px;">
+                    <h1>⚠️ Assinatura Não Encontrada</h1>
+                    <div class="alert-warning">
+                        <p>Nenhuma assinatura encontrada para: <strong>{email}</strong></p>
+                    </div>
+                    <div style="margin-top: 30px;">
+                        <a href="/admin/stripe/utils" class="button">← Voltar</a>
+                        <a href="/admin/subscriptions" class="button">📋 Ver Todas</a>
+                    </div>
+                </div>
+                """
+                return HTMLResponse(_html_page("Não Encontrada", body))
+            
+            # Se plan_type não foi fornecido, tentar detectar do stripe_subscription_id
+            detected_plan = plan_type or None
+            
+            if not detected_plan and sub.stripe_subscription_id:
+                # Tentar buscar do Stripe
+                try:
+                    import stripe as stripe_lib
+                    if stripe_lib.api_key:
+                        subscription = stripe_lib.Subscription.retrieve(sub.stripe_subscription_id)
+                        if subscription and subscription.get('items'):
+                            price_id = subscription['items']['data'][0]['price']['id']
+                            # Usar a mesma lógica do crud.py
+                            from crud import map_plan_from_price_id
+                            detected_plan = map_plan_from_price_id(price_id)
+                            logger.info(f"Detected plan_type from Stripe: {detected_plan} (price: {price_id})")
+                except Exception as e:
+                    logger.warning(f"Could not fetch from Stripe API: {e}")
+            
+            # Se ainda não temos plan, usar o que já existe ou padrão
+            if not detected_plan:
+                detected_plan = sub.plan_type if sub.plan_type not in ("pending", "unknown", None) else "monthly"
+            
+            # Atualizar assinatura
+            old_plan = sub.plan_type
+            old_expires = sub.expires_at
+            
+            sub.plan_type = detected_plan
+            
+            # Calcular expires_at baseado no plan_type
+            from datetime import datetime, timedelta
+            if detected_plan == "monthly":
+                sub.expires_at = datetime.utcnow() + timedelta(days=30)
+            elif detected_plan == "quarterly":
+                sub.expires_at = datetime.utcnow() + timedelta(days=90)
+            elif detected_plan == "annual":
+                sub.expires_at = datetime.utcnow() + timedelta(days=365)
+            else:
+                sub.expires_at = datetime.utcnow() + timedelta(days=30)
+            
+            sub.updated_at = datetime.utcnow()
+            db.commit()
+            
+            logger.info(f"✅ Admin force-updated subscription: {email} | plan: {old_plan} → {detected_plan} | expires: {old_expires} → {sub.expires_at}")
+            
+            body = f"""
+            <div style="text-align: center; margin-top: 50px;">
+                <h1>✅ Assinatura Atualizada!</h1>
+                
+                <div class="alert-success">
+                    <h3>Atualização concluída com sucesso</h3>
+                    <p><strong>Email:</strong> {email}</p>
+                </div>
+                
+                <div style="margin: 30px auto; max-width: 600px; text-align: left;">
+                    <h3>📊 Mudanças Aplicadas:</h3>
+                    <table>
+                        <tr>
+                            <th>Campo</th>
+                            <th>Antes</th>
+                            <th>Depois</th>
+                        </tr>
+                        <tr>
+                            <td><strong>Plan Type</strong></td>
+                            <td><code>{old_plan or 'NULL'}</code></td>
+                            <td><code style="color: #10b981;">{detected_plan}</code></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Expires At</strong></td>
+                            <td><code>{old_expires.strftime('%Y-%m-%d') if old_expires else 'NULL'}</code></td>
+                            <td><code style="color: #10b981;">{sub.expires_at.strftime('%Y-%m-%d %H:%M')}</code></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Status</strong></td>
+                            <td colspan="2"><code>{sub.status}</code></td>
+                        </tr>
+                    </table>
+                </div>
+                
+                <div class="alert-info" style="margin-top: 20px;">
+                    <h4>✨ O que foi feito:</h4>
+                    <ul style="text-align: left; display: inline-block;">
+                        <li>plan_type atualizado de "{old_plan or 'NULL'}" para "{detected_plan}"</li>
+                        <li>expires_at calculado: hoje + {30 if detected_plan=='monthly' else (90 if detected_plan=='quarterly' else 365)} dias</li>
+                        <li>Usuário agora pode usar /unlock_access no bot</li>
+                    </ul>
+                </div>
+                
+                <div style="margin-top: 30px;">
+                    <a href="/admin/subscriptions" class="button">📋 Ver Todas Assinaturas</a>
+                    <a href="/admin/stripe/utils" class="button">🔧 Utilidades Stripe</a>
+                </div>
+            </div>
+            """
+            
+            return HTMLResponse(_html_page("Atualização Concluída", body))
+            
+    except Exception as e:
+        logger.error(f"Error force-updating subscription {email}: {e}", exc_info=True)
+        
+        body = f"""
+        <div style="text-align: center; margin-top: 50px;">
+            <h1>❌ Erro ao Atualizar</h1>
+            <div class="alert-error">
+                <p><strong>Erro:</strong> {str(e)}</p>
+                <pre style="text-align: left; background: #1f2937; padding: 15px; border-radius: 8px; overflow-x: auto;">{str(e)}</pre>
+            </div>
+            <div style="margin-top: 30px;">
+                <a href="/admin/stripe/utils" class="button">← Voltar</a>
+            </div>
+        </div>
+        """
+        
+        return HTMLResponse(_html_page("Erro", body))
+
 
 
