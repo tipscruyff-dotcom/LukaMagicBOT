@@ -2265,9 +2265,17 @@ def start_scheduler():
         logger.info(f"   - Notification time: {notification_time}:00 {TZ_NAME}")
         logger.info(f"   - Current time: {now_tz().strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
+        # Validar timezone antes de criar scheduler
+        try:
+            tz = ZoneInfo(TZ_NAME)
+            logger.info(f"✅ Timezone {TZ_NAME} validated successfully")
+        except Exception as tz_error:
+            logger.error(f"❌ Invalid timezone {TZ_NAME}: {tz_error}. Falling back to UTC")
+            tz = ZoneInfo("UTC")
+
         # Timezone e defaults seguros
         scheduler = AsyncIOScheduler(
-            timezone=ZoneInfo(TZ_NAME),
+            timezone=tz,
             job_defaults={
                 "coalesce": True,          # junta execuções atrasadas
                 "max_instances": 1,        # evita concorrência
@@ -2276,34 +2284,43 @@ def start_scheduler():
         )
         logger.info("✅ AsyncIOScheduler instance created with robust defaults")
 
-        # JOB DIÁRIO: REMOÇÃO
-        scheduler.add_job(
-            safe_cleanup_expired_subscriptions,   # usa a wrapper segura
-            CronTrigger(
-                hour=int(cleanup_time),
-                minute=0,
-                timezone=ZoneInfo(TZ_NAME),
-            ),
-            id="cleanup_expired",
-            name="Cleanup Expired Subscriptions",
-            replace_existing=True
-        )
-        logger.info(f"✅ Cleanup job added - will run daily at {cleanup_time}:00 {TZ_NAME}")
-
-        # JOB DIÁRIO: NOTIFICAÇÕES
-        if os.getenv("ENABLE_EXPIRY_NOTIFICATIONS", "1") == "1":
+        # JOB DIÁRIO: REMOÇÃO (com tratamento individual de erro)
+        try:
             scheduler.add_job(
-                send_expiry_notifications,
+                safe_cleanup_expired_subscriptions,   # usa a wrapper segura
                 CronTrigger(
-                    hour=int(notification_time),
+                    hour=int(cleanup_time),
                     minute=0,
-                    timezone=ZoneInfo(TZ_NAME),
+                    timezone=tz,
                 ),
-                id="send_notifications",
-                name="Send Expiry Notifications",
+                id="cleanup_expired",
+                name="Cleanup Expired Subscriptions",
                 replace_existing=True
             )
-            logger.info(f"✅ Notification job added - will run daily at {notification_time}:00 {TZ_NAME}")
+            logger.info(f"✅ Cleanup job added - will run daily at {cleanup_time}:00 {TZ_NAME}")
+        except Exception as e:
+            logger.error(f"❌ CRITICAL: Failed to add cleanup job: {e}", exc_info=True)
+            logger.error(f"   This means automatic user removal will NOT work!")
+
+        # JOB DIÁRIO: NOTIFICAÇÕES (com tratamento individual de erro)
+        if os.getenv("ENABLE_EXPIRY_NOTIFICATIONS", "1") == "1":
+            try:
+                scheduler.add_job(
+                    send_expiry_notifications,
+                    CronTrigger(
+                        hour=int(notification_time),
+                        minute=0,
+                        timezone=tz,
+                    ),
+                    id="send_notifications",
+                    name="Send Expiry Notifications",
+                    replace_existing=True
+                )
+                logger.info(f"✅ Notification job added - will run daily at {notification_time}:00 {TZ_NAME}")
+            except Exception as e:
+                logger.error(f"❌ Failed to add notification job: {e}", exc_info=True)
+        else:
+            logger.info("⏭️ Expiry notifications disabled (ENABLE_EXPIRY_NOTIFICATIONS=0)")
 
         # HEARTBEAT a cada 1 min (se existir a função)
         try:
@@ -2313,7 +2330,7 @@ def start_scheduler():
             )
             logger.info("✅ Heartbeat job added - will run every 1 minute")
         except Exception as e:
-            logger.debug(f"Heartbeat job skipped: {e}")
+            logger.warning(f"⚠️ Heartbeat job skipped: {e}")
 
         # CATCH-UP NA INICIALIZAÇÃO:
         # Se o horário diário (ex.: 01:00) já passou hoje e o job ainda não rodou após o boot,
@@ -2346,14 +2363,14 @@ def start_scheduler():
                 )
                 logger.info(f"🧪 TEST: Agendado cleanup teste para {test_time.strftime('%H:%M:%S')} para verificar funcionamento")
         except Exception as e:
-            logger.debug("catch-up desabilitado: %s", e)
+            logger.warning(f"⚠️ Catch-up scheduling failed: {e}", exc_info=True)
 
         # Job de teste (opcional) - roda a cada 6 horas se habilitado
         if os.getenv("CLEANUP_TEST_MODE", "0") == "1":
             try:
                 scheduler.add_job(
                     safe_cleanup_expired_subscriptions,
-                    CronTrigger(hour="*/6", timezone=ZoneInfo(TZ_NAME)),  # A cada 6 horas
+                    CronTrigger(hour="*/6", timezone=tz),  # A cada 6 horas
                     id='cleanup_test',
                     name='Cleanup Test Mode',
                     replace_existing=True
@@ -2362,6 +2379,7 @@ def start_scheduler():
             except Exception as e:
                 logger.error(f"❌ Failed to add test job: {e}")
 
+        # INICIAR O SCHEDULER
         scheduler.start()
         logger.info("🚀 scheduler iniciado. TZ=%s | jobs=%s", TZ_NAME, [j.id for j in scheduler.get_jobs()])
         
@@ -2371,12 +2389,20 @@ def start_scheduler():
         for job in jobs:
             next_run = job.next_run_time.strftime('%Y-%m-%d %H:%M:%S %Z') if job.next_run_time else 'Never'
             logger.info(f"   - {job.name} (ID: {job.id}) - Next: {next_run}")
+        
+        # DIAGNÓSTICO FINAL: Verificar se os jobs críticos foram adicionados
+        job_ids = [j.id for j in jobs]
+        if "cleanup_expired" not in job_ids:
+            logger.error("🚨 CRITICAL WARNING: cleanup_expired job was NOT added to scheduler!")
+            logger.error("   Automatic user removal will NOT work!")
+        if "send_notifications" not in job_ids and os.getenv("ENABLE_EXPIRY_NOTIFICATIONS", "1") == "1":
+            logger.warning("⚠️ WARNING: send_notifications job was NOT added to scheduler!")
             
     except ImportError as e:
         logger.error(f"❌ APScheduler not available: {e}")
         logger.error("💡 Install with: pip install apscheduler")
     except Exception as e:
-        logger.error(f"❌ Failed to start scheduler: {e}")
+        logger.error(f"❌ Failed to start scheduler: {e}", exc_info=True)
         logger.error(f"📋 Error details: {type(e).__name__}: {str(e)}")
 
 
