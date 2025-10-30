@@ -71,6 +71,14 @@ def infer_plan_type_from_price(price: dict | None) -> Optional[str]:
 def _digits_only(s: str) -> str:
     return "".join(ch for ch in (s or "") if ch.isdigit())
 
+def _is_valid_telegram_id(telegram_id: str) -> bool:
+    """Valida se o ID do Telegram é válido (mínimo 6 dígitos)"""
+    if not telegram_id:
+        return False
+    digits = _digits_only(telegram_id)
+    # IDs do Telegram geralmente têm 7-10 dígitos, mas vamos aceitar 6+ para ser seguro
+    return len(digits) >= 6
+
 def event_already_processed(db, event_id: str) -> bool:
     """Verifica se evento Stripe já foi processado (idempotência)."""
     return db.query(models.StripeEvent).filter_by(event_id=event_id).first() is not None
@@ -119,6 +127,14 @@ def update_full_name_if_empty(db, email: str, full_name: str) -> bool:
     return True
 
 def mark_telegram_id(db, email: str, telegram_user_id: str) -> bool:
+    """Vincula Telegram ID ao email. 
+    
+    REGRAS:
+    1. Cadastro sempre é salvo (mesmo sem ID no pagamento)
+    2. Primeiro ID VÁLIDO (6+ dígitos) fica PERMANENTEMENTE vinculado
+    3. IDs inválidos (< 6 dígitos, ex: '72') PODEM ser sobrescritos
+    4. Ninguém pode ativar o email com outro ID depois do primeiro válido
+    """
     if not email or not telegram_user_id:
         return False
 
@@ -126,29 +142,56 @@ def mark_telegram_id(db, email: str, telegram_user_id: str) -> bool:
     new_id = str(telegram_user_id).strip()
     if not new_id:
         return False
+    
+    # Validar se o novo ID é válido (6+ dígitos)
+    if not _is_valid_telegram_id(new_id):
+        logger.warning("❌ Invalid Telegram ID format for email=%s (id=%s) - ID must have 6+ digits", 
+                      normalized_email, new_id)
+        return False
 
     sub = db.query(models.Subscription).filter(models.Subscription.email == normalized_email).first()
     if not sub:
+        logger.warning("❌ No subscription found for email=%s", normalized_email)
         return False
 
     current_id = getattr(sub, "telegram_user_id", None)
-    if current_id:
-        current_id_str = str(current_id).strip()
-        if current_id_str == new_id:
-            logger.info("Telegram ID already linked for email=%s", normalized_email)
-            return True
-        logger.warning("Telegram ID mismatch for email=%s (existing=%s, requested=%s)",
-                       normalized_email, current_id_str, new_id)
-        return False
-
-    sub.telegram_user_id = new_id
-    try:
-        sub.updated_at = datetime.utcnow()
-    except Exception:
-        pass
-    db.commit()
-    logger.info("Telegram ID set for email=%s", normalized_email)
-    return True
+    
+    # Caso 1: Email ainda não tem ID vinculado (primeiro acesso)
+    if not current_id or current_id.strip() == "":
+        sub.telegram_user_id = new_id
+        try:
+            sub.updated_at = datetime.utcnow()
+        except Exception:
+            pass
+        db.commit()
+        logger.info("🔒 First valid Telegram ID linked for email=%s (id=%s) - NOW LOCKED", 
+                   normalized_email, new_id)
+        return True
+    
+    current_id_str = str(current_id).strip()
+    
+    # Caso 2: Mesmo ID tentando novamente (OK)
+    if current_id_str == new_id:
+        logger.info("✅ Telegram ID already correctly linked for email=%s", normalized_email)
+        return True
+    
+    # Caso 3: ID atual é INVÁLIDO (< 6 dígitos) - permite sobrescrever com válido
+    if not _is_valid_telegram_id(current_id_str):
+        logger.info("🔄 Overwriting INVALID Telegram ID '%s' with VALID ID '%s' for email=%s",
+                   current_id_str, new_id, normalized_email)
+        sub.telegram_user_id = new_id
+        try:
+            sub.updated_at = datetime.utcnow()
+        except Exception:
+            pass
+        db.commit()
+        logger.info("🔒 Valid ID now locked for email=%s", normalized_email)
+        return True
+    
+    # Caso 4: ID atual é VÁLIDO mas diferente - BLOQUEIA (segurança)
+    logger.warning("🚫 SECURITY: Telegram ID mismatch for email=%s (existing_valid_id=%s, requested_id=%s) - BLOCKED",
+                   normalized_email, current_id_str, new_id)
+    return False
 
 def upsert_subscription_from_checkout_session(db, session: dict) -> bool:
     """
@@ -175,16 +218,20 @@ def upsert_subscription_from_checkout_session(db, session: dict) -> bool:
             label = ((fld.get("label") or {}).get("custom") or "").lower()
             if "telegram" in key or "telegram" in label:
                 if isinstance(fld.get("text"), dict):
-                    telegram_id = _digits_only(fld["text"].get("value") or "")
-                    if telegram_id:
+                    raw_id = _digits_only(fld["text"].get("value") or "")
+                    if raw_id and _is_valid_telegram_id(raw_id):
+                        telegram_id = raw_id
                         break
                 if isinstance(fld.get("numeric"), dict) and not telegram_id:
-                    telegram_id = _digits_only(fld["numeric"].get("value") or "")
-                    if telegram_id:
+                    raw_id = _digits_only(fld["numeric"].get("value") or "")
+                    if raw_id and _is_valid_telegram_id(raw_id):
+                        telegram_id = raw_id
                         break
         md = session.get("metadata") or {}
         if not telegram_id and isinstance(md, dict):
-            telegram_id = _digits_only(md.get("telegram_id") or "")
+            raw_id = _digits_only(md.get("telegram_id") or "")
+            if raw_id and _is_valid_telegram_id(raw_id):
+                telegram_id = raw_id
 
         plan_type_hint = None
         if isinstance(md, dict):

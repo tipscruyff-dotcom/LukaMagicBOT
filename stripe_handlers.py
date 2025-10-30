@@ -24,6 +24,14 @@ def _extract_email_and_name(session: dict) -> Tuple[Optional[str], Optional[str]
     if isinstance(name, str): name = name.strip()
     return email, name
 
+def _is_valid_telegram_id(telegram_id: str) -> bool:
+    """Valida se o ID do Telegram é válido (mínimo 6 dígitos)"""
+    if not telegram_id:
+        return False
+    digits = "".join(c for c in telegram_id if c.isdigit())
+    # IDs do Telegram geralmente têm 7-10 dígitos, mas vamos aceitar 6+ para ser seguro
+    return len(digits) >= 6
+
 def _extract_telegram_id_from_session(session: dict) -> Optional[str]:
     # TEXT first
     for fld in (session or {}).get("custom_fields") or []:
@@ -35,7 +43,7 @@ def _extract_telegram_id_from_session(session: dict) -> Optional[str]:
                 raw = (txt.get("value") or "")
                 if isinstance(raw, str) and raw.strip():
                     d = "".join(c for c in raw if c.isdigit())
-                    if d: return d
+                    if d and _is_valid_telegram_id(d): return d
     # NUMERIC fallback
     for fld in (session or {}).get("custom_fields") or []:
         key = (fld.get("key") or "").lower()
@@ -46,14 +54,14 @@ def _extract_telegram_id_from_session(session: dict) -> Optional[str]:
                 raw = (num.get("value") or "")
                 if isinstance(raw, str) and raw.strip():
                     d = "".join(c for c in raw if c.isdigit())
-                    if d: return d
+                    if d and _is_valid_telegram_id(d): return d
     # metadata fallback
     md = (session or {}).get("metadata") or {}
     if isinstance(md, dict):
         raw = md.get("telegram_id")
         if isinstance(raw, str) and raw.strip():
             d = "".join(c for c in raw if c.isdigit())
-            if d: return d
+            if d and _is_valid_telegram_id(d): return d
     return None
 
 def _map_stripe_status(stripe_status: str) -> str:

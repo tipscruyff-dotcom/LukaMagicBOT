@@ -287,13 +287,25 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
                 user_id_str = str(update.effective_user.id)
                 user_id_int = update.effective_user.id
                 stored_id = (subscription.telegram_user_id or "").strip() if getattr(subscription, "telegram_user_id", None) else ""
-                if stored_id and stored_id != user_id_str:
-                    logger.warning("Telegram ID %s tried to use email %s that is already linked to %s",
+                
+                # Verificar se já tem ID VÁLIDO vinculado (6+ dígitos)
+                from crud import _is_valid_telegram_id
+                has_valid_id = stored_id and _is_valid_telegram_id(stored_id)
+                
+                if has_valid_id and stored_id != user_id_str:
+                    logger.warning("Telegram ID %s tried to use email %s that is already linked to VALID ID %s",
                                    user_id_str, email, stored_id)
                     await update.effective_message.reply_text(
-                        "ATTENTION: This email is already linked to another Telegram account. Use the same Telegram you used for your purchase or contact support: @Sthefano_p"
+                        "⚠️ ATTENTION: This email is already activated with another Telegram account.\n\n"
+                        "🔒 For security, each email can only be linked to ONE Telegram ID.\n\n"
+                        "Please use the same Telegram account you used for activation, or contact support: @Sthefano_p"
                     )
                     return ConversationHandler.END
+                
+                # Se o ID atual for inválido (ex: "72"), permite sobrescrever
+                if stored_id and not has_valid_id:
+                    logger.info("Email %s has invalid ID '%s', will be replaced with valid ID %s",
+                               email, stored_id, user_id_str)
 
                 logger.info("Trying to link telegram_user_id %s to email %s", user_id_str, email)
                 success = mark_telegram_id(db, email, user_id_str)
