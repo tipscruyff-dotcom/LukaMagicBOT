@@ -1,0 +1,50 @@
+<div style="margin-bottom: 20px;">
+    <h1>🏘️ VIP Groups Management</h1>
+    <div class="nav-buttons" style="margin: 10px 0;">
+        <a href="/admin/subscriptions" style="margin-right: 10px;">← Admin Panel</a>
+        <a href="/admin/data" style="margin-right: 10px;">📊 Data Viewer</a>
+        <a href="/admin/removal" style="margin-right: 10px;">🚫 Auto Removal</a>
+        <a href="/admin/logout">🚪 Logout</a>
+    </div>
+</div>
+
+<div class="alert-info" style="padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+    <h2>📊 VIP Groups Overview</h2>
+    <p><strong>🕐 Last Updated:</strong> {{ current_time }}</p>
+    <p><strong>🤖 Bot Status:</strong> {{ bot_status }}</p>
+    <p><strong>📋 Total VIP Groups:</strong> {{ total_groups }}</p>
+</div>
+
+<h2>🏘️ VIP Groups List</h2>
+<div style="overflow-x: auto;">
+    <table class="debug-table">
+        <thead>
+            <tr>
+                <th>Group ID</th>
+                <th>Group Name</th>
+                <th>Bot Status</th>
+                <th>Member Count</th>
+                <th>Bot Permissions</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{ groups_html }}
+        </tbody>
+    </table>
+</div>
+
+<div class="alert-warning" style="padding: 15px; border-radius: 8px; margin-top: 20px;">
+    <h3>ℹ️ Important Notes</h3>
+    <ul style="line-height: 1.6;">
+        <li><strong>Bot Admin Required:</strong> Bot must be admin in groups to remove users</li>
+        <li><strong>Member Count:</strong> Includes all members (bots, admins, regular users)</li>
+        <li><strong>Permissions:</strong> Bot needs "Ban users" permission for auto-removal</li>
+        <li><strong>Group IDs:</strong> Configured in VIP_GROUP_IDS environment variable</li>
+    </ul>
+</div>
+
+<div class="nav-buttons" style="margin-top: 20px;">
+    <a href="/admin/subscriptions" class="button">← Back to Admin</a>
+    <a href="/admin/removal" class="button">🚫 Auto Removal Dashboard</a>
+</div>
