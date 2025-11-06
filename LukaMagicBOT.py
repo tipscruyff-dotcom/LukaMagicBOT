@@ -478,7 +478,7 @@ async def unlock_access_check_email(update: Update, context: ContextTypes.DEFAUL
 
                     await update.effective_message.reply_text(
                         message,
-                        parse_mode="Markdown",
+                        parse_mode=None,  # override to plain text to avoid Markdown parsing issues with invite URLs
                         disable_web_page_preview=True
                     )
                     logger.info(
